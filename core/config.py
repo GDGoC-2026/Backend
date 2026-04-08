@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     github_client_secret: str | None = None
     github_redirect_uri: str | None = None
 
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = "password"
+
+    milvus_uri: str = "http://localhost:19530"
+
     model_config = SettingsConfigDict(
         env_file=("Backend/.env", ".env"),
         env_file_encoding="utf-8",
