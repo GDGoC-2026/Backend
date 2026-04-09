@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from Backend.core.config import settings
 
 celery_app = Celery(
@@ -15,3 +16,10 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
 )
+
+celery_app.conf.beat_schedule = {
+    'send-review-reminders-every-hour': {
+        'task': 'Backend.workers.notification_tasks.send_due_review_notifications',
+        'schedule': crontab(minute=0), # Runs at the top of every hour
+    },
+}
