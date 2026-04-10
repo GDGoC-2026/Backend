@@ -83,3 +83,6 @@ watchfiles==1.1.1
 wcwidth==0.6.0
 websockets==16.0
 yarl==1.23.0
+google-generativeai==0.4.0
+sentence-transformers==3.0.0
+
