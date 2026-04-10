@@ -25,6 +25,10 @@ class Settings(BaseSettings):
 
     milvus_uri: str = "http://localhost:19530"
 
+    # --- LightRAG / Gemini ---
+    gemini_api_key: str = ""
+    lightrag_working_dir: str = "./lightrag_data"
+
     model_config = SettingsConfigDict(
         env_file=("Backend/.env", ".env"),
         env_file_encoding="utf-8",
