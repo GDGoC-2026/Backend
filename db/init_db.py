@@ -1,7 +1,7 @@
 from Backend.db.session import engine
 from Backend.db.base import Base
 
-from Backend.models import user, gamification, learning
+from Backend.models import user, gamification, learning, notes
 
 import asyncio
 

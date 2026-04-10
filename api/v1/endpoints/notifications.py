@@ -14,6 +14,7 @@ class PushSubCreate(BaseModel):
     endpoint: str
     keys: dict
 
+
 @router.post("/subscribe", status_code=201)
 async def subscribe_push(
     sub: PushSubCreate, 

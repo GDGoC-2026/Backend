@@ -16,7 +16,7 @@ from Backend.core.config import settings
 from Backend.db.base import Base
 
 # Import model modules so they are registered with Base.metadata.
-from Backend.models import gamification, user, learning  # noqa: F401
+from Backend.models import gamification, user, learning, notes  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -80,6 +80,7 @@ async def run_migrations_online() -> None:
     connectable = create_async_engine(
         settings.database_url,
         poolclass=pool.NullPool,
+        connect_args={"statement_cache_size": 0},
     )
 
     async with connectable.connect() as connection:

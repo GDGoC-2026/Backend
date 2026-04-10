@@ -12,7 +12,9 @@ from Backend.models.user import User
 from Backend.schemas.user import Token, UserCreate, UserLogin, UserProfile
 from Backend.services.oauth import oauth
 
+
 router = APIRouter()
+
 
 @router.post("/register", response_model=UserProfile, status_code=201)
 async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
@@ -21,6 +23,7 @@ async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Email already registered")
     user = await create_user(db, payload.email, payload.password, payload.full_name)
     return user
+
 
 @router.post("/login", response_model=Token)
 async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
@@ -33,9 +36,11 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)):
     )
     return Token(access_token=token)
 
+
 @router.get("/me", response_model=UserProfile)
 async def me(current_user: User = Depends(get_current_user)):
     return current_user
+
 
 @router.get("/google/login")
 async def google_login(request: Request):
@@ -43,6 +48,7 @@ async def google_login(request: Request):
         raise HTTPException(status_code=400, detail="Google OAuth is not configured")
     redirect_uri = settings.google_redirect_uri
     return await oauth.google.authorize_redirect(request, redirect_uri)
+
 
 @router.get("/google/callback", response_model=Token)
 async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
@@ -66,12 +72,14 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     access_token = create_access_token(subject=user.email)
     return Token(access_token=access_token)
 
+
 @router.get("/github/login")
 async def github_login(request: Request):
     if "github" not in oauth.create_client.__self__._clients:
         raise HTTPException(status_code=400, detail="GitHub OAuth is not configured")
     redirect_uri = settings.github_redirect_uri
     return await oauth.github.authorize_redirect(request, redirect_uri)
+
 
 @router.get("/github/callback", response_model=Token)
 async def github_callback(request: Request, db: AsyncSession = Depends(get_db)):
