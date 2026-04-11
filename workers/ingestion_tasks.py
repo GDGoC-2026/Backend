@@ -2,10 +2,13 @@ import asyncio
 from Backend.core.celery_app import celery_app
 from Backend.services.note_analyzer import NoteAnalyzer
 from Backend.db.session import AsyncSessionLocal
+from Backend.db.graph import neo4j_db
 from Backend.models.notes import Note
 from sqlalchemy import update
 
-# Import LightRAG orchestration here
+
+# TODO: Import LightRAG orchestration here
+
 
 async def mark_note_as_synced(user_id: str, file_name: str):
     """
@@ -20,6 +23,18 @@ async def mark_note_as_synced(user_id: str, file_name: str):
         await session.execute(stmt)
         await session.commit()
 
+
+async def process_chunks_to_graph(user_id: str, file_name: str, chunks: list):
+    for index, chunk in enumerate(chunks):
+        print(f"Processing chunk {index} for user {user_id} from {file_name}")
+        # Insert Nodes/Edges into Neo4j
+        await neo4j_db.insert_note_chunk(user_id, file_name, index, chunk)
+        
+        # TODO: 1. LLM Entity Extraction
+        # TODO: 3. Generate Embeddings for chunk
+        # TODO: 4. Insert Vector into Milvus
+
+
 @celery_app.task(bind=True, max_retries=3)
 def process_markdown_note(self, user_id: str, file_name: str, content: str):
     """
@@ -28,14 +43,8 @@ def process_markdown_note(self, user_id: str, file_name: str, content: str):
     analyzer = NoteAnalyzer()
     chunks = analyzer.chunk_markdown(content)
     
-    # Simulating the LightRAG Graph generation pipeline
-    for index, chunk in enumerate(chunks):
-        print(f"Processing chunk {index} for user {user_id} from {file_name}")
-        
-        # 1. LLM Entity Extraction would happen here
-        # 2. Insert Nodes/Edges into Neo4j
-        # 3. Generate Embeddings for chunk
-        # 4. Insert Vector into Milvus
+    # Run graph DB async insertion
+    asyncio.run(process_chunks_to_graph(user_id, file_name, chunks))
         
     # Mark as synced upon completion
     asyncio.run(mark_note_as_synced(user_id, file_name))
