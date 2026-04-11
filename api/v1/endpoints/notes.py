@@ -87,6 +87,24 @@ async def get_folder_details(
     }
 
 
+@router.delete("/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_folder(
+    folder_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id)
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+        
+    await db.delete(folder)
+    await db.commit()
+    return None
+
+
 # --- Notes ---
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED)
 async def upload_markdown_note(
@@ -220,3 +238,20 @@ async def get_note(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return note
+
+
+@router.delete("/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_note(
+    note_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    result = await db.execute(select(Note).where(Note.id == note_id, Note.user_id == current_user.id))
+    note = result.scalar_one_or_none()
+    
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    await db.delete(note)
+    await db.commit()
+    return None

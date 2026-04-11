@@ -6,7 +6,7 @@ celery_app = Celery(
     "knowledge_bus",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["Backend.workers.ingestion_tasks"]
+    include=["Backend.workers.ingestion_tasks", "Backend.workers.notification_tasks"]
 )
 
 celery_app.conf.update(

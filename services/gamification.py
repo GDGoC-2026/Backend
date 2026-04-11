@@ -3,8 +3,31 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from Backend.models.gamification import UserStats, DailyStreak
 
+
 class GamificationEngine:
     XP_PER_LEVEL = 100
+
+
+    @staticmethod
+    def calculate_rank(level: int) -> str:
+        """Returns a string rank based on the user's level."""
+        ranks = [
+            (1, "Novice Scholar"),
+            (5, "Apprentice Learner"),
+            (10, "Adept Student"),
+            (20, "Knowledge Seeker"),
+            (35, "Master Thinker"),
+            (50, "Grandmaster Polymath"),
+            (100, "Apex Scholar")
+        ]
+        current_rank = ranks[0][1]
+        for threshold, rank_name in ranks:
+            if level >= threshold:
+                current_rank = rank_name
+            else:
+                break
+        return current_rank
+
 
     @staticmethod
     async def award_xp(db: AsyncSession, user_id: str, amount: int) -> dict:
@@ -22,7 +45,14 @@ class GamificationEngine:
         stats.current_level = new_level
 
         await db.commit()
-        return {"xp_awarded": amount, "total_xp": stats.total_xp, "level_up": level_up, "current_level": stats.current_level}
+        return {
+            "xp_awarded": amount, 
+            "total_xp": stats.total_xp, 
+            "level_up": level_up, 
+            "current_level": stats.current_level,
+            "rank": GamificationEngine.calculate_rank(stats.current_level)
+        }
+
 
     @staticmethod
     async def update_streak(db: AsyncSession, user_id: str) -> dict:
@@ -59,3 +89,31 @@ class GamificationEngine:
 
         await db.commit()
         return {"current_streak": current_streak, "maintained": streak_maintained}
+
+
+    @staticmethod
+    async def get_leaderboard(db: AsyncSession, limit: int = 10) -> list[dict]:
+        """Fetch the top users by total XP."""
+        from Backend.models.user import User
+        # Join UserStats with User to get full names, sort by XP descending
+        stmt = (
+            select(UserStats, User.full_name)
+            .join(User, UserStats.user_id == User.id)
+            .order_by(UserStats.total_xp.desc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        rows = result.all()
+        
+        leaderboard = []
+        for rank, (stats, name) in enumerate(rows, start=1):
+            leaderboard.append({
+                "rank_position": rank,
+                "user_id": str(stats.user_id),
+                "name": name or "Anonymous Learner",
+                "level": stats.current_level,
+                "rank_title": GamificationEngine.calculate_rank(stats.current_level),
+                "total_xp": stats.total_xp,
+                "longest_streak": stats.longest_streak
+            })
+        return leaderboard
