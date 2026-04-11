@@ -31,6 +31,87 @@ class FlashcardResponse(BaseModel):
         from_attributes = True
 
 
+class FlashcardCreateUpdate(BaseModel):
+    front_content: str
+    back_content: str
+
+
+@router.get("", response_model=List[FlashcardResponse])
+async def get_flashcards(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Fetch all flashcards for the current user."""
+    result = await db.execute(
+        select(Flashcard)
+        .where(Flashcard.user_id == current_user.id)
+        .order_by(Flashcard.due_date.asc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return result.scalars().all()
+
+
+@router.post("", response_model=FlashcardResponse)
+async def create_flashcard(
+    flashcard_in: FlashcardCreateUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new personal flashcard manually."""
+    new_card = Flashcard(
+        user_id=current_user.id,
+        front_content=flashcard_in.front_content,
+        back_content=flashcard_in.back_content
+    )
+    db.add(new_card)
+    await db.commit()
+    await db.refresh(new_card)
+    return new_card
+
+
+@router.put("/{card_id}", response_model=FlashcardResponse)
+async def update_flashcard(
+    card_id: UUID,
+    flashcard_in: FlashcardCreateUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update an existing flashcard."""
+    result = await db.execute(select(Flashcard).where(Flashcard.id == card_id, Flashcard.user_id == current_user.id))
+    card = result.scalar_one_or_none()
+    
+    if not card:
+        raise HTTPException(status_code=404, detail="Flashcard not found")
+        
+    card.front_content = flashcard_in.front_content
+    card.back_content = flashcard_in.back_content
+    
+    await db.commit()
+    await db.refresh(card)
+    return card
+
+
+@router.delete("/{card_id}")
+async def delete_flashcard(
+    card_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a flashcard."""
+    result = await db.execute(select(Flashcard).where(Flashcard.id == card_id, Flashcard.user_id == current_user.id))
+    card = result.scalar_one_or_none()
+    
+    if not card:
+        raise HTTPException(status_code=404, detail="Flashcard not found")
+        
+    await db.delete(card)
+    await db.commit()
+    return {"message": "Flashcard deleted successfully"}
+
+
 @router.get("/due", response_model=List[FlashcardResponse])
 async def get_due_flashcards(
     limit: int = 50,

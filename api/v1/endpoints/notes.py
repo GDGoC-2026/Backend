@@ -8,6 +8,7 @@ from Backend.api.deps import get_current_user
 from Backend.db.session import get_db
 from Backend.models.user import User
 from Backend.models.notes import Note, Folder
+from Backend.db.graph import neo4j_db
 from Backend.schemas.notes import (
     NoteCreate, NoteUpdate, NoteResponse, 
     FolderCreate, FolderResponse, FolderDetailResponse
@@ -16,6 +17,13 @@ from Backend.workers.ingestion_tasks import process_markdown_note
 
 
 router = APIRouter()
+
+
+@router.get("/graph-visualizer")
+async def get_knowledge_graph(current_user: User = Depends(get_current_user)):
+    """Fetch the user's interactive knowledge map powered by Neo4j."""
+    graph_data = await neo4j_db.get_user_graph(str(current_user.id))
+    return graph_data
 
 
 # --- Folders ---

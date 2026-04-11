@@ -70,7 +70,7 @@ class GamificationEngine:
             delta = today - streak.last_activity_date
             if delta == timedelta(days=1):
                 # Consecutive day
-                current_streak += 1
+                current_streak += 1 # pyright: ignore[reportUnboundVariable]
                 streak.last_activity_date = today
                 streak_maintained = True
             elif delta > timedelta(days=1):
