@@ -13,4 +13,4 @@ COPY . /app/Backend
 # Make sure the python path understands the Backend module
 ENV PYTHONPATH=/app
 
-CMD ["uvicorn", "Backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "Backend.main:app", "--host", "0.0.0.0", "--port", "1234", "--reload"]
