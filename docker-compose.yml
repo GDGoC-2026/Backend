@@ -10,7 +10,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/appdb
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8000:8000"
+      - "1234:1234"
     volumes:
       - .:/app/Backend
     depends_on:
