@@ -13,6 +13,9 @@ services:
       - "1234:1234"
     volumes:
       - .:/app/Backend
+    command: >
+      sh -c "python -c 'from Backend.models import Base; from sqlalchemy import create_engine; # Thêm logic tạo bảng thủ công hoặc chạy alembic ở đây' 
+      && uvicorn Backend.main:app --host 0.0.0.0 --port 1234"
     depends_on:
       db:
         condition: service_healthy
