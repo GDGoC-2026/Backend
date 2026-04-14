@@ -7,14 +7,14 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-appdb}
       REDIS_URL: redis://redis:6379/0
     ports:
       - "1234:1234"
     volumes:
       - .:/app/Backend
     command: >
-      sh -c "alembic -c /app/Backend/alembic.ini upgrade head
+      sh -c "export DATABASE_URL=postgresql+asyncpg://$${POSTGRES_USER:-postgres}:$${POSTGRES_PASSWORD:-postgres}@$${POSTGRES_HOST:-db}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB:-appdb}
+      && alembic -c /app/Backend/alembic.ini upgrade head
       && uvicorn Backend.main:app --host 0.0.0.0 --port 1234"
     depends_on:
       db:
@@ -35,7 +35,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-appdb}"]
       interval: 10s
       timeout: 5s
       retries: 5
