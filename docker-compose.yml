@@ -14,7 +14,7 @@ services:
     volumes:
       - .:/app/Backend
     command: >
-      sh -c "python -c 'from Backend.models import Base; from sqlalchemy import create_engine; # Thêm logic tạo bảng thủ công hoặc chạy alembic ở đây' 
+      sh -c "alembic upgrade head
       && uvicorn Backend.main:app --host 0.0.0.0 --port 1234"
     depends_on:
       db:
