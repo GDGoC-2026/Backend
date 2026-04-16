@@ -2,15 +2,25 @@ from starlette.middleware.sessions import SessionMiddleware
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+from contextlib import asynccontextmanager
 
 from Backend.api.v1.router import api_router
 from Backend.core.config import settings
 from Backend.services.oauth import register_oauth_providers
-from Backend.db.vector import connect_milvus, disconnect_milvus, create_default_collections
-
+from Backend.db.vector import init_milvus, disconnect_milvus, connect_milvus, create_default_collections
+from Backend.db.graph import neo4j_db
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_milvus()
+    yield
+    # Shutdown
+    disconnect_milvus()
+    await neo4j_db.close()
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
 
