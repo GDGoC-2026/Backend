@@ -15,3 +15,4 @@ class User(Base):
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_oauth_user: Mapped[bool] = mapped_column(Boolean, default=False)
+    subscription_tier: Mapped[str] = mapped_column(String(50), default="freemium") # freemium, pro, developer, enterprise

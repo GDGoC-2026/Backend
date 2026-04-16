@@ -16,6 +16,7 @@ class UserProfile(BaseModel):
     email: EmailStr
     full_name: str | None = None
     is_active: bool
+    subscription_tier: str
 
 class Token(BaseModel):
     access_token: str

@@ -33,7 +33,7 @@ class FSRSScheduler:
         new_stability = current_stability * (1 + a * math.exp(-b * difficulty) * h * math.exp(c * current_stability))
         return new_stability
 
-    def calculate_next_review(self, card, grade: int) -> datetime:
+    def calculate_next_review(self, card, grade: int) -> tuple[datetime, float, float]:
         now = datetime.now(timezone.utc)
         
         if not card.last_review:
@@ -43,7 +43,12 @@ class FSRSScheduler:
 
         new_stability = self.update_memory_state(card.stability, card.difficulty, grade, t)
         
+        # Update difficulty
+        new_difficulty = max(1.0, min(10.0, card.difficulty - 0.5 * (grade - 3)))
+        if card.reps == 0:
+            new_difficulty = 5.0 # Initial difficulty
+        
         # Determine interval (days) to hit 90% retrievability
         interval = new_stability * (math.log(0.9) / math.log(0.9)) # Simplified to interval = stability
         
-        return now + timedelta(days=interval)
+        return now + timedelta(days=interval), new_stability, new_difficulty

@@ -8,6 +8,7 @@ from Backend.api.deps import get_current_user
 from Backend.db.session import get_db
 from Backend.models.user import User
 from Backend.models.notes import Note, Folder
+from Backend.db.graph import neo4j_db
 from Backend.schemas.notes import (
     NoteCreate, NoteUpdate, NoteResponse, 
     FolderCreate, FolderResponse, FolderDetailResponse
@@ -16,6 +17,13 @@ from Backend.workers.ingestion_tasks import process_markdown_note
 
 
 router = APIRouter()
+
+
+@router.get("/graph-visualizer")
+async def get_knowledge_graph(current_user: User = Depends(get_current_user)):
+    """Fetch the user's interactive knowledge map powered by Neo4j."""
+    graph_data = await neo4j_db.get_user_graph(str(current_user.id))
+    return graph_data
 
 
 # --- Folders ---
@@ -85,6 +93,24 @@ async def get_folder_details(
         "subfolders": subfolders_result.scalars().all(),
         "notes": notes_result.scalars().all()
     }
+
+
+@router.delete("/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_folder(
+    folder_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id)
+    )
+    folder = result.scalar_one_or_none()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+        
+    await db.delete(folder)
+    await db.commit()
+    return None
 
 
 # --- Notes ---
@@ -220,3 +246,20 @@ async def get_note(
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return note
+
+
+@router.delete("/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_note(
+    note_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    result = await db.execute(select(Note).where(Note.id == note_id, Note.user_id == current_user.id))
+    note = result.scalar_one_or_none()
+    
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    await db.delete(note)
+    await db.commit()
+    return None
