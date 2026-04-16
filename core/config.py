@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     neo4j_password: str = "password"
 
     milvus_uri: str = "http://localhost:19530"
+    
+    # AI & LLM
+    gemini_api_key: str = ""
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_dim: int = 384
+    
+    # Recommendation settings
+    recommendation_threshold: float = 0.5  # Min score to trigger recommendation
+    recommendation_trigger_lines: int = 10  # Lines of code/notes to trigger recommendation
 
     # --- LightRAG / Gemini ---
     gemini_api_key: str = ""

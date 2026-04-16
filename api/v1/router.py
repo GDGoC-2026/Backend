@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from Backend.api.v1.endpoints import auth, users, notifications, editor, notes, knowledge, learning, gamification, judge, chatbot, documents
+from Backend.api.v1.endpoints import auth, users, notifications, editor, notes, knowledge, recommendation, learning, gamification, judge, chatbot, documents
 
 api_router = APIRouter()
 
@@ -9,6 +9,7 @@ api_router.include_router(notifications.router, prefix="/notifications", tags=["
 api_router.include_router(editor.router, prefix="/editor", tags=["editor"])
 api_router.include_router(notes.router, prefix="/notes", tags=["notes"])
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
+api_router.include_router(recommendation.router, prefix="/recommendations", tags=["recommendations"])
 api_router.include_router(learning.router, prefix="/learning", tags=["learning"])
 api_router.include_router(gamification.router, prefix="/gamification", tags=["gamification"])
 api_router.include_router(judge.router, prefix="/judge", tags=["judge"])

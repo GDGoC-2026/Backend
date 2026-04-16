@@ -107,6 +107,9 @@ wcwidth==0.6.0
 websockets==16.0
 xxhash==3.6.0
 yarl==1.23.0
+google-generativeai==0.4.0
+sentence-transformers==3.0.0
+
 
 # LightRAG & Graph Visualization
 lightrag-hku>=0.1.21
