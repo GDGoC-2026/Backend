@@ -5,6 +5,9 @@ from Backend.db.session import AsyncSessionLocal
 from Backend.db.graph import neo4j_db
 from Backend.models.notes import Note
 from sqlalchemy import update
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from Backend.core.config import settings
+from Backend.db.vector import init_milvus
 
 
 # TODO: Import LightRAG orchestration here
@@ -30,9 +33,18 @@ async def process_chunks_to_graph(user_id: str, file_name: str, chunks: list):
         # Insert Nodes/Edges into Neo4j
         await neo4j_db.insert_note_chunk(user_id, file_name, index, chunk)
         
-        # TODO: 1. LLM Entity Extraction
-        # TODO: 3. Generate Embeddings for chunk
-        # TODO: 4. Insert Vector into Milvus
+        # TODO: LLM Entity Extraction
+        # TODO: Generate Embeddings for chunk
+        # TODO: Insert Vector into Milvus
+
+        # # 1. Generate Embeddings for chunk
+        # embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=settings.gemini_api_key)
+        # vector = embeddings.embed_query(chunk)
+        
+        # # 2. Insert Vector into Milvus
+        # collection = init_milvus()
+        # collection.insert([[user_id], [file_name], [chunk], [vector]])
+        # collection.flush()
 
 
 @celery_app.task(bind=True, max_retries=3)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from pymilvus import Collection
 # from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-# from langchain.schema import HumanMessage, SystemMessage
+# from langchain_core.messages import HumanMessage, SystemMessage
 
 from Backend.api.deps import get_current_user
 from Backend.models.user import User
@@ -10,7 +10,7 @@ from Backend.core.config import settings
 
 router = APIRouter()
 
-# embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=settings.gemini_api_key)
+# embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", api_key=settings.gemini_api_key)
 # llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", google_api_key=settings.gemini_api_key, temperature=0.2)
 
 class ChatRequest(BaseModel):
