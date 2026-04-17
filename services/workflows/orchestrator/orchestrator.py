@@ -29,6 +29,7 @@ from ..agents import (
     MindmapCreatorAgent,
     QuizCreatorAgent,
     LessonCreatorAgent,
+    CodingTaskCreatorAgent,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
        - MindmapCreatorAgent
        - QuizCreatorAgent
        - LessonCreatorAgent
+         - CodingTaskCreatorAgent (only when coding is relevant)
     3. Aggregate and validate all results
     4. Return comprehensive content bundle
     """
@@ -61,6 +63,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
         self.register_agent("mindmap_creator", MindmapCreatorAgent())
         self.register_agent("quiz_creator", QuizCreatorAgent())
         self.register_agent("lesson_creator", LessonCreatorAgent())
+        self.register_agent("coding_task_creator", CodingTaskCreatorAgent())
     
     async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -171,18 +174,20 @@ class ExerciseOrchestrator(CoordinatorAgent):
         # Prepare input data for each agent
         base_input = {
             "topic": request.topic,
+            "subject": request.student_profile.subject,
             "subtopics": request.subtopics,
             "learning_objectives": request.learning_objectives,
             "difficulty": persona_output.get("recommended_difficulty"),
             "learning_style": request.student_profile.learning_style,
             "content_customization": persona_output.get("content_customization"),
         }
+        content_type_values = [ct.value for ct in request.content_types]
         
         # Create tasks for parallel execution (limit concurrency)
         max_parallel = WORKFLOW_CONFIG["max_parallel_agents"]
         tasks = []
         
-        if "flashcard" in [ct.value for ct in request.content_types]:
+        if "flashcard" in content_type_values:
             flashcard_input = {**base_input, "max_cards": 10}
             tasks.append(
                 self._execute_agent_with_timeout(
@@ -191,7 +196,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
                 )
             )
         
-        if "mindmap" in [ct.value for ct in request.content_types]:
+        if "mindmap" in content_type_values:
             mindmap_input = {**base_input, "max_depth": 3}
             tasks.append(
                 self._execute_agent_with_timeout(
@@ -200,8 +205,13 @@ class ExerciseOrchestrator(CoordinatorAgent):
                 )
             )
         
-        if "quiz" in [ct.value for ct in request.content_types]:
-            quiz_input = {**base_input, "max_questions": 10}
+        if "quiz" in content_type_values:
+            quiz_input = {
+                **base_input,
+                "max_questions": request.max_items,
+            }
+            if request.quiz_question_types:
+                quiz_input["question_types"] = request.quiz_question_types
             tasks.append(
                 self._execute_agent_with_timeout(
                     "quiz_creator",
@@ -209,12 +219,24 @@ class ExerciseOrchestrator(CoordinatorAgent):
                 )
             )
         
-        if "lesson" in [ct.value for ct in request.content_types]:
+        if "lesson" in content_type_values:
             lesson_input = {**base_input, "include_examples": True, "include_case_studies": True}
             tasks.append(
                 self._execute_agent_with_timeout(
                     "lesson_creator",
                     lesson_input
+                )
+            )
+
+        if "coding_task" in content_type_values:
+            coding_task_input = {
+                **base_input,
+                "max_tasks": max(1, min(5, request.max_items)),
+            }
+            tasks.append(
+                self._execute_agent_with_timeout(
+                    "coding_task_creator",
+                    coding_task_input
                 )
             )
         
@@ -328,6 +350,22 @@ class ExerciseOrchestrator(CoordinatorAgent):
                 quality_score=lesson_data.get("quality_score", 0.0),
             )
             aggregated.append(content)
+
+        if "CodingTaskCreatorAgent" in content_results and content_results["CodingTaskCreatorAgent"]["success"]:
+            coding_data = content_results["CodingTaskCreatorAgent"]["data"]
+            coding_tasks = coding_data.get("coding_tasks", [])
+            if coding_data.get("include_coding_exercises", False) and coding_tasks:
+                content = GeneratedContent(
+                    content_type=ContentType.CODING_TASK,
+                    title=f"Coding Tasks: {request.topic}",
+                    content=str(coding_tasks),  # Would be JSON in practice
+                    student_id=request.student_profile.student_id,
+                    topic=request.topic,
+                    difficulty_level=coding_data.get("difficulty"),
+                    estimated_time_minutes=len(coding_tasks) * 15,
+                    quality_score=coding_data.get("quality_score", 0.0),
+                )
+                aggregated.append(content)
         
         return aggregated
     

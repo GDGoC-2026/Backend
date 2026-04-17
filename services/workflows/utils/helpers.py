@@ -17,7 +17,7 @@ def create_student_profile(
     strengths: List[str],
     learning_pace: str = "normal",
     daily_study_time_minutes: int = 30,
-    preferred_content_types: List[str] = None
+    preferred_content_types: List[str] | None = None
 ) -> StudentProfile:
     """
     Helper function to create a StudentProfile object.
@@ -64,8 +64,9 @@ def create_content_generation_request(
     subtopics: List[str],
     learning_objectives: List[str],
     content_types: List[str],
-    difficulty_level: str = None,
+    difficulty_level: str | None = None,
     max_items: int = 10,
+    quiz_question_types: List[str] | None = None,
 ) -> ContentGenerationRequest:
     """
     Helper function to create a ContentGenerationRequest object.
@@ -78,6 +79,7 @@ def create_content_generation_request(
         content_types: Types of content to generate ("flashcard", "mindmap", "quiz", "lesson")
         difficulty_level: Override difficulty (default: from persona analysis)
         max_items: Maximum items per content type
+        quiz_question_types: Optional quiz question types (multiple_choice, fill_blank, true_false)
         
     Returns:
         ContentGenerationRequest object
@@ -97,6 +99,7 @@ def create_content_generation_request(
         content_types=parsed_content_types,
         difficulty_level=difficulty,
         max_items=max_items,
+        quiz_question_types=quiz_question_types,
     )
 
 

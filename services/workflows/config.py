@@ -20,6 +20,7 @@ class ContentType(str, Enum):
     MINDMAP = "mindmap"
     QUIZ = "quiz"
     LESSON = "lesson"
+    CODING_TASK = "coding_task"
 
 
 @dataclass
@@ -47,6 +48,7 @@ class ContentGenerationRequest:
     content_types: list[ContentType]
     difficulty_level: Optional[ContentLevel] = None
     max_items: int = 10
+    quiz_question_types: Optional[list[str]] = None
 
 
 @dataclass
@@ -78,6 +80,7 @@ AGENT_TIMEOUTS = {
     "mindmap_creator": 25,
     "quiz_creator": 30,
     "lesson_creator": 40,
+    "coding_task_creator": 35,
 }
 
 # Content quality thresholds

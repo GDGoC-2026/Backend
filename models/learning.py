@@ -34,3 +34,45 @@ class PushSubscription(Base):
     endpoint: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     p256dh: Mapped[str] = mapped_column(String, nullable=False)
     auth: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_lesson_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_lessons.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    quiz_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_retry: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+    total_questions: Mapped[int] = mapped_column(Integer, nullable=False)
+    answered_questions: Mapped[int] = mapped_column(Integer, nullable=False)
+    correct_answers: Mapped[int] = mapped_column(Integer, nullable=False)
+    passing_score: Mapped[float] = mapped_column(Float, nullable=False)
+    score_percent: Mapped[float] = mapped_column(Float, nullable=False)
+    passed: Mapped[bool] = mapped_column(nullable=False)
+    time_spent_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    unanswered_question_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
+    submitted_answers: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    per_question_results: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    performance_by_type: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    performance_by_subtopic: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    recommendations: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+    xp_awarded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_level_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
