@@ -1,3 +1,4 @@
+import asyncio
 import google.generativeai as genai
 from Backend.core.config import settings
 
@@ -13,8 +14,8 @@ class FormatterAgent:
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is not set in configuration")
         
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel("gemini-2.0-flash")
+        genai.configure(api_key=settings.gemini_api_key) # type: ignore
+        self.model = genai.GenerativeModel("gemini-2.5-flash") # type: ignore
 
     async def format_notes(self, raw_content: str, title: str | None = None) -> str:
         """
@@ -49,15 +50,18 @@ Output ONLY the formatted markdown content, no additional commentary."""
         user_message += raw_content
 
         try:
-            response = self.model.generate_content(
+            response = await asyncio.to_thread(
+                self.model.generate_content,
                 f"{system_prompt}\n\n{user_message}",
-                generation_config={
-                    "temperature": 0.7,
-                    "top_p": 0.95,
-                    "top_k": 40,
-                    "max_output_tokens": 4096,
-                }
+                generation_config=genai.types.GenerationConfig( # type: ignore
+                    temperature=0.7,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=4096,
+                ),
             )
+            if not getattr(response, "text", None):
+                raise RuntimeError("Empty response from Gemini formatter")
             return response.text
         except Exception as e:
             raise RuntimeError(f"Error formatting notes with Gemini: {str(e)}")

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -19,10 +20,11 @@ VAPID_CLAIMS = {
     "exp": int(time.time()) + 12 * 60 * 60
 }
 
-@celery_app.task
-async def send_due_review_notifications():
+async def _send_due_review_notifications_async() -> dict:
     """Finds users with due cards and sends a push notification."""
     now = datetime.now(timezone.utc)
+    sent_count = 0
+    failed_count = 0
     
     async with AsyncSessionLocal() as db:
         # Find users who have cards due right now
@@ -50,5 +52,18 @@ async def send_due_review_notifications():
                         vapid_private_key=VAPID_PRIVATE_KEY,
                         vapid_claims=VAPID_CLAIMS
                     )
+                    sent_count += 1
                 except WebPushException as ex:
+                    failed_count += 1
                     print(f"Push failed: {repr(ex)}")
+
+    return {
+        "users_with_due_cards": len(users_with_due_cards),
+        "notifications_sent": sent_count,
+        "notifications_failed": failed_count,
+    }
+
+
+@celery_app.task
+def send_due_review_notifications() -> dict:
+    return asyncio.run(_send_due_review_notifications_async())

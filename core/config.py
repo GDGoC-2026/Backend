@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     neo4j_username: str = "neo4j"
     neo4j_password: str = "password"
 
-    milvus_uri: str = "http://localhost:19530"
+    milvus_uri: str = ""
+    milvus_token: str = ""
     
     # AI & LLM
     gemini_api_key: str = ""

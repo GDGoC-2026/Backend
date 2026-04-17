@@ -32,6 +32,7 @@ fastapi==0.135.3
 filetype==1.2.0
 frozenlist==1.8.0
 google-auth==2.49.2
+google-cloud-aiplatform>=1.70.0
 google-genai==1.73.1
 greenlet==3.3.2
 grpcio==1.80.0
@@ -66,7 +67,6 @@ pandas==3.0.2
 passlib==1.7.4
 prompt_toolkit==3.0.52
 propcache==0.4.1
-protobuf==7.34.1
 py-vapid==1.9.4
 pyasn1==0.6.3
 pyasn1_modules==0.4.2
@@ -76,6 +76,7 @@ pydantic-settings==2.13.1
 pydantic_core==2.41.5
 pymilvus==2.6.11
 pypdf==6.10.2
+pytest==8.4.2
 python-dateutil==2.9.0.post0
 python-docx==1.2.0
 python-dotenv==1.2.2
@@ -107,11 +108,7 @@ wcwidth==0.6.0
 websockets==16.0
 xxhash==3.6.0
 yarl==1.23.0
-google-generativeai==0.4.0
 sentence-transformers==3.0.0
-
-
-# LightRAG & Graph Visualization
 lightrag-hku>=0.1.21
 google-generativeai>=0.8.3
 networkx>=3.0

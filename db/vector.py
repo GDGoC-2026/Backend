@@ -2,8 +2,8 @@ from pymilvus import connections, Collection, FieldSchema, CollectionSchema, Dat
 from Backend.core.config import settings
 import logging
 
-logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "knowledge_chunks"
 
@@ -11,7 +11,8 @@ COLLECTION_NAME = "knowledge_chunks"
 def init_milvus():
     connections.connect(
         alias="default", 
-        uri=settings.milvus_uri
+        uri=settings.milvus_uri,
+        token=settings.milvus_token
     )
 
     if not utility.has_collection(COLLECTION_NAME):
@@ -34,7 +35,7 @@ def init_milvus():
             "index_type": "IVF_FLAT",
             "params": {"nlist": 1024}
         }
-        collection.create_index(field_name="embedding", index_params=index_params)
+        _index_result = collection.create_index(field_name="embedding", index_params=index_params)
     
     collection = Collection(COLLECTION_NAME)
     collection.load() # Load into memory for searching
@@ -43,6 +44,7 @@ def init_milvus():
 
 def disconnect_milvus():
     connections.disconnect("default")
+
 
 def create_default_collections():
     """
@@ -53,7 +55,7 @@ def create_default_collections():
     collections = ["coding", "english"]
     
     for collection_name in collections:
-        if Collection.exists(collection_name):
+        if utility.has_collection(collection_name):
             logger.info(f"Collection '{collection_name}' already exists")
             continue
         
@@ -65,7 +67,7 @@ def create_default_collections():
             FieldSchema(name="metadata", dtype=DataType.VARCHAR, max_length=2048),  # JSON string
             FieldSchema(name="source_type", dtype=DataType.VARCHAR, max_length=50),  # user_note, tip, etc.
             FieldSchema(name="created_at", dtype=DataType.INT64),  # timestamp
-            FieldSchema(name="user_id", dtype=DataType.INT64),  # for user-specific recommendations
+            FieldSchema(name="user_id", dtype=DataType.VARCHAR, max_length=36),  # for user-specific recommendations
         ]
         
         schema = CollectionSchema(
@@ -81,11 +83,11 @@ def create_default_collections():
             "index_type": "HNSW",
             "params": {"M": 8, "efConstruction": 200}
         }
-        collection.create_index(field_name="embeddings", index_params=index_params)
+        _index_result = collection.create_index(field_name="embeddings", index_params=index_params)
         logger.info(f"Collection '{collection_name}' created successfully with HNSW index")
 
 def get_collection(collection_name: str) -> Collection | None:
     """Get a collection by name"""
-    if Collection.exists(collection_name):
+    if utility.has_collection(collection_name):
         return Collection(collection_name)
     return None

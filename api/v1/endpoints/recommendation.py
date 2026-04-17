@@ -1,4 +1,5 @@
 import logging
+import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from Backend.api.deps import get_current_user
@@ -70,8 +71,14 @@ async def stream_recommendations(
     
     async def generate_sse():
         """Generate SSE formatted response"""
+        if not recommendation_agent:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Recommendation service not available. GEMINI_API_KEY not configured."
+            )
+        
         try:
-            yield "data: {\"status\": \"started\", \"content_type\": \"" + request.content_type + "\"}\n\n"
+            yield f"data: {json.dumps({'status': 'started', 'content_type': request.content_type})}\n\n"
             
             # Stream recommendations from agent
             async for chunk in recommendation_agent.generate_recommendations(
@@ -81,13 +88,13 @@ async def stream_recommendations(
                 top_k=3
             ):
                 # SSE format: data: {json}\n\n
-                yield f"data: {{\"chunk\": {repr(chunk)}}}\n\n"
+                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
             
-            yield "data: {\"status\": \"completed\"}\n\n"
+            yield f"data: {json.dumps({'status': 'completed'})}\n\n"
             
         except Exception as e:
             logger.error(f"Error in SSE stream: {str(e)}")
-            yield f"data: {{\"error\": {repr(str(e))}}}\n\n"
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
     
     return StreamingResponse(
         generate_sse(),

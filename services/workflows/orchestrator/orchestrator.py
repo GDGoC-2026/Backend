@@ -18,6 +18,7 @@ from ..config import (
     ContentGenerationRequest,
     GeneratedContent,
     StudentProfile,
+    ContentType,
     WORKFLOW_CONFIG,
     AGENT_TIMEOUTS,
     QUALITY_THRESHOLDS,
@@ -74,7 +75,10 @@ class ExerciseOrchestrator(CoordinatorAgent):
             - generated_content: All generated content pieces
             - workflow_log: Execution log for debugging
         """
-        request: ContentGenerationRequest = input_data.get("request")
+        request_obj = input_data.get("request")
+        if not isinstance(request_obj, ContentGenerationRequest):
+            raise ValueError("request must be a ContentGenerationRequest instance")
+        request = request_obj
         
         logger.info(f"[Orchestrator] Starting workflow for student: {request.student_profile.student_id}")
         
@@ -142,6 +146,8 @@ class ExerciseOrchestrator(CoordinatorAgent):
     async def _execute_persona_phase(self, request: ContentGenerationRequest) -> Dict[str, Any]:
         """Execute the PersonaAgent to analyze student"""
         persona_agent = self.get_agent("persona")
+        if persona_agent is None:
+            raise RuntimeError("Persona agent is not registered")
         
         persona_input = {
             "student_profile": request.student_profile,
@@ -221,7 +227,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
             for result in batch_results:
                 if isinstance(result, Exception):
                     logger.error(f"Agent execution error: {str(result)}")
-                else:
+                elif isinstance(result, dict):
                     agent_name = result.get("agent", "unknown")
                     results[agent_name] = result
                     self.execution_log.append(result)
@@ -270,7 +276,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
         if "FlashcardCreatorAgent" in content_results and content_results["FlashcardCreatorAgent"]["success"]:
             flashcard_data = content_results["FlashcardCreatorAgent"]["data"]
             content = GeneratedContent(
-                content_type="flashcard",
+                content_type=ContentType.FLASHCARD,
                 title=f"Flashcards: {request.topic}",
                 content=str(flashcard_data["flashcards"]),  # Would be JSON in practice
                 student_id=request.student_profile.student_id,
@@ -284,7 +290,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
         if "MindmapCreatorAgent" in content_results and content_results["MindmapCreatorAgent"]["success"]:
             mindmap_data = content_results["MindmapCreatorAgent"]["data"]
             content = GeneratedContent(
-                content_type="mindmap",
+                content_type=ContentType.MINDMAP,
                 title=f"Mind Map: {request.topic}",
                 content=mindmap_data.get("json_format", ""),
                 student_id=request.student_profile.student_id,
@@ -298,7 +304,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
         if "QuizCreatorAgent" in content_results and content_results["QuizCreatorAgent"]["success"]:
             quiz_data = content_results["QuizCreatorAgent"]["data"]
             content = GeneratedContent(
-                content_type="quiz",
+                content_type=ContentType.QUIZ,
                 title=f"Quiz: {request.topic}",
                 content=str(quiz_data["questions"]),  # Would be JSON in practice
                 student_id=request.student_profile.student_id,
@@ -312,7 +318,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
         if "LessonCreatorAgent" in content_results and content_results["LessonCreatorAgent"]["success"]:
             lesson_data = content_results["LessonCreatorAgent"]["data"]
             content = GeneratedContent(
-                content_type="lesson",
+                content_type=ContentType.LESSON,
                 title=lesson_data["lesson"].get("title", f"Lesson: {request.topic}"),
                 content=str(lesson_data["sections"]),  # Would be JSON in practice
                 student_id=request.student_profile.student_id,

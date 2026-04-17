@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select
 from uuid import UUID
 
 from Backend.api.deps import get_current_user
@@ -17,6 +17,21 @@ from Backend.workers.ingestion_tasks import process_markdown_note
 
 
 router = APIRouter()
+
+
+async def _validate_owned_folder(
+    folder_id: Optional[UUID],
+    db: AsyncSession,
+    current_user: User,
+) -> None:
+    if folder_id is None:
+        return
+
+    result = await db.execute(
+        select(Folder.id).where(Folder.id == folder_id, Folder.user_id == current_user.id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Folder not found")
 
 
 @router.get("/graph-visualizer")
@@ -95,7 +110,7 @@ async def get_folder_details(
     }
 
 
-@router.delete("/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_folder(
     folder_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -123,6 +138,8 @@ async def upload_markdown_note(
 ):
     if not file.filename or not file.filename.endswith('.md'):
         raise HTTPException(status_code=400, detail="Only Markdown (.md) files are supported.")
+
+    await _validate_owned_folder(folder_id, db, current_user)
     
     content = await file.read()
     try:
@@ -182,6 +199,8 @@ async def create_note(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _validate_owned_folder(note_in.folder_id, db, current_user)
+
     new_note = Note(
         user_id=current_user.id,
         title=note_in.title,
@@ -218,6 +237,7 @@ async def update_note(
     if note_in.content is not None:
         note.content = note_in.content
     if note_in.folder_id is not None:
+        await _validate_owned_folder(note_in.folder_id, db, current_user)
         note.folder_id = note_in.folder_id
 
     note.is_synced_with_graph = False # Mark as unsynced until Celery finishes

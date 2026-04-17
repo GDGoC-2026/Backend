@@ -1,10 +1,10 @@
+import asyncio
 import google.generativeai as genai
-from pymilvus import Collection
 import logging
+from uuid import UUID
 from Backend.core.config import settings
 from Backend.db.vector import get_collection
-import json
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,24 @@ class RecommendationAgent:
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is not set in configuration")
         
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel("gemini-2.0-flash")
+        genai.configure(api_key=settings.gemini_api_key) # type: ignore
+        self.model = genai.GenerativeModel("gemini-2.5-flash") # type: ignore
+
+    @staticmethod
+    def _resolve_collection_name(content_type: str) -> str:
+        """Map endpoint content types to Milvus collection names."""
+        mapping = {
+            "code": "coding",
+            "coding": "coding",
+            "english": "english",
+        }
+        return mapping.get(content_type, content_type)
+
+    @staticmethod
+    def _chunk_text(text: str, chunk_size: int = 250) -> list[str]:
+        if not text:
+            return []
+        return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
     async def generate_recommendations(
         self,
@@ -51,22 +67,23 @@ class RecommendationAgent:
             # Build system prompt based on content type
             system_prompt = self._get_system_prompt(content_type, rag_context, user_context)
             
-            # Stream response from Gemini
-            response = self.model.generate_content(
+            # Use a worker thread to avoid blocking the event loop with SDK sync calls.
+            response = await asyncio.to_thread(
+                self.model.generate_content,
                 f"{system_prompt}\n\nUser Content:\n{content}",
-                stream=True,
-                generation_config={
-                    "temperature": 0.7,
-                    "top_p": 0.95,
-                    "top_k": 40,
-                    "max_output_tokens": 1024,
-                }
+                stream=False,
+                generation_config=genai.types.GenerationConfig( # type: ignore
+                    temperature=0.7,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=1024,
+                ),
             )
-            
-            # Yield chunks as they arrive
-            for chunk in response:
-                if chunk.text:
-                    yield chunk.text
+
+            response_text = getattr(response, "text", "") or ""
+            for chunk in self._chunk_text(response_text):
+                yield chunk
+                await asyncio.sleep(0)
                     
         except Exception as e:
             logger.error(f"Error generating recommendations: {str(e)}")
@@ -82,9 +99,10 @@ class RecommendationAgent:
         Retrieve relevant context from Milvus for RAG.
         """
         try:
-            collection = get_collection(content_type)
+            collection_name = self._resolve_collection_name(content_type)
+            collection = get_collection(collection_name)
             if not collection:
-                logger.warning(f"Collection '{content_type}' not found")
+                logger.warning(f"Collection '{collection_name}' not found")
                 return ""
             
             # TODO: Generate embeddings from content
@@ -92,7 +110,7 @@ class RecommendationAgent:
             # For now, return empty context
             # In production: embeddings = self.embed_text(content)
             
-            logger.info(f"RAG context would be retrieved for {content_type}")
+            logger.info(f"RAG context would be retrieved for {collection_name}")
             return ""
             
         except Exception as e:
@@ -153,8 +171,8 @@ Provide 3-5 specific, actionable recommendations."""
         self,
         content: str,
         content_type: str,
-        user_id: int,
-        metadata: dict = None,
+        user_id: UUID | str,
+        metadata: dict[str, Any] | None = None,
         source_type: str = "user_note"
     ) -> bool:
         """
@@ -168,10 +186,13 @@ Provide 3-5 specific, actionable recommendations."""
             source_type: "user_note", "tip", "resource", etc.
         """
         try:
-            collection = get_collection(content_type)
+            collection_name = self._resolve_collection_name(content_type)
+            collection = get_collection(collection_name)
             if not collection:
-                logger.error(f"Collection '{content_type}' not found")
+                logger.error(f"Collection '{collection_name}' not found")
                 return False
+
+            metadata = metadata or {}
             
             # TODO: Generate embeddings
             # embeddings = self.embed_text(content)
@@ -180,7 +201,7 @@ Provide 3-5 specific, actionable recommendations."""
             # data = [[embeddings], [content], [metadata], [source_type], [user_id]]
             # collection.insert(data)
             
-            logger.info(f"Content added to {content_type} collection")
+            logger.info(f"Content added to {collection_name} collection")
             return True
             
         except Exception as e:

@@ -8,7 +8,7 @@ import io
 from Backend.api.deps import get_current_user
 from Backend.db.session import get_db
 from Backend.models.user import User
-from Backend.models.notes import Note
+from Backend.models.notes import Note, Folder
 from Backend.schemas.notes import NoteResponse
 from Backend.workers.ingestion_tasks import process_markdown_note
 
@@ -55,6 +55,13 @@ async def upload_general_document(
         )
     
     content = await file.read()
+
+    if folder_id is not None:
+        folder_result = await db.execute(
+            select(Folder.id).where(Folder.id == folder_id, Folder.user_id == current_user.id)
+        )
+        if folder_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
     
     try:
         if ext == '.pdf':

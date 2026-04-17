@@ -61,6 +61,7 @@ class GamificationEngine:
         streak = result.scalar_one_or_none()
 
         streak_maintained = False
+        current_streak = 1
 
         if not streak:
             streak = DailyStreak(user_id=user_id, last_activity_date=today)
@@ -70,7 +71,7 @@ class GamificationEngine:
             delta = today - streak.last_activity_date
             if delta == timedelta(days=1):
                 # Consecutive day
-                current_streak += 1 # pyright: ignore[reportUnboundVariable]
+                current_streak += 1
                 streak.last_activity_date = today
                 streak_maintained = True
             elif delta > timedelta(days=1):

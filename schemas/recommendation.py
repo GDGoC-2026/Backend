@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime
 
 
@@ -34,7 +34,7 @@ class AddToRAGRequest(BaseModel):
     """Request to add content to RAG knowledge base"""
     content: str = Field(..., description="Content to add")
     content_type: str = Field(..., description="'code' or 'english'")
-    metadata: Optional[dict] = Field(default={}, description="Additional metadata")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
     source_type: str = Field(
         default="user_note",
         description="Source type: 'user_note', 'tip', 'resource', etc."

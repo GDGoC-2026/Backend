@@ -1,13 +1,24 @@
+import logging
 import os
 from pathlib import Path
-import networkx as nx
+from typing import Literal, cast
 from uuid import UUID
-from lightrag import LightRAG
-from lightrag.llm.gemini import gpt_embedding_gemini
-from lightrag.llm import gpt_complete_gemini
+
+import google.auth
+import networkx as nx
+import vertexai
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+from lightrag.utils import EmbeddingFunc
 
 from Backend.core.config import settings
 from Backend.schemas.knowledge import GraphNode, GraphEdge
+
+
+logger = logging.getLogger(__name__)
+
+SupportedQueryMode = Literal["local", "global", "hybrid", "naive", "mix", "bypass"]
 
 
 class LightRAGService:
@@ -18,10 +29,93 @@ class LightRAGService:
 
     def __init__(self):
         """Initialize the LightRAG service."""
-        if not settings.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY is not set in configuration")
-        
-        self._rag_instances = {}  # Cache for RAG instances per user_id
+        self._rag_instances: dict[str, LightRAG] = {}
+
+        self._location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
+        self._llm_model_name = os.getenv("LIGHTRAG_LLM_MODEL", "google/gemini-1.5-flash")
+        self._embedding_model_name = os.getenv("LIGHTRAG_EMBEDDING_MODEL", "google/text-embedding-005")
+        self._embedding_dim = int(os.getenv("LIGHTRAG_EMBEDDING_DIM", "768"))
+        self._embedding_max_tokens = int(os.getenv("LIGHTRAG_EMBEDDING_MAX_TOKENS", "8192"))
+        self._llm_max_async = int(os.getenv("LIGHTRAG_LLM_MAX_ASYNC", "1"))
+
+        # Acquire Application Default Credentials for Vertex OpenAI-compatible endpoints.
+        self._credentials, detected_project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        self._project_id = (
+            os.getenv("VERTEX_AI_PROJECT_ID")
+            or os.getenv("GOOGLE_CLOUD_PROJECT")
+            or detected_project
+        )
+        if not self._project_id:
+            raise ValueError(
+                "Vertex AI project ID is missing. Set VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT."
+            )
+
+        self._auth_request = GoogleAuthRequest()
+        self._get_access_token()
+        vertexai.init(project=self._project_id, location=self._location)
+
+        self._chat_base_url = (
+            f"https://{self._location}-aiplatform.googleapis.com/v1beta1/projects/"
+            f"{self._project_id}/locations/{self._location}/endpoints/openapi"
+        )
+        self._embedding_base_url = (
+            f"https://{self._location}-aiplatform.googleapis.com/v1/projects/"
+            f"{self._project_id}/locations/{self._location}/endpoints/openapi"
+        )
+        self._embedding_func = self._build_embedding_func()
+
+    def _get_access_token(self) -> str:
+        """Get a fresh OAuth token for Vertex OpenAI-compatible endpoints."""
+        try:
+            if not self._credentials.token or not self._credentials.valid:
+                self._credentials.refresh(self._auth_request)
+
+            if not self._credentials.token:
+                raise ValueError("Access token is empty after credential refresh")
+
+            return self._credentials.token
+        except Exception as e:
+            raise ValueError(
+                "Unable to obtain Google Cloud access token. "
+                "Run 'gcloud auth application-default login' and ensure Vertex AI API is enabled."
+            ) from e
+
+    async def _llm_model_func(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        history_messages: list[dict] | None = None,
+        **kwargs,
+    ) -> str:
+        """LLM function passed to LightRAG using Vertex OpenAI-compatible chat endpoint."""
+        return await openai_complete_if_cache(
+            self._llm_model_name,
+            prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            api_key=self._get_access_token(),
+            base_url=self._chat_base_url,
+            **kwargs,
+        )
+
+    def _build_embedding_func(self) -> EmbeddingFunc:
+        """Create embedding function configured for Vertex OpenAI-compatible endpoint."""
+
+        async def _embedding_func(texts: list[str]):
+            return await openai_embed.func(
+                texts,
+                model=self._embedding_model_name,
+                api_key=self._get_access_token(),
+                base_url=self._embedding_base_url,
+            )
+
+        return EmbeddingFunc(
+            embedding_dim=self._embedding_dim,
+            max_token_size=self._embedding_max_tokens,
+            func=_embedding_func,
+        )
 
     def _get_working_dir(self, user_id: UUID | str) -> str:
         """
@@ -58,9 +152,10 @@ class LightRAGService:
             
             self._rag_instances[user_id_str] = LightRAG(
                 working_dir=working_dir,
-                llm_model_func=gpt_complete_gemini,
-                llm_model_name="gemini-2.0-flash",
-                embedding_func=gpt_embedding_gemini,
+                llm_model_func=self._llm_model_func,
+                llm_model_name=self._llm_model_name,
+                llm_model_max_async=self._llm_max_async,
+                embedding_func=self._embedding_func,
                 embedding_batch_num=1,
             )
         
@@ -95,13 +190,21 @@ class LightRAGService:
             Answer from the knowledge graph
         """
         rag = self.get_rag_instance(user_id)
-        
-        # Map mode string to QueryParam mode
-        from lightrag.query_param import QueryParam
-        query_param = QueryParam(mode=mode)
+
+        valid_modes = {"local", "global", "hybrid", "naive", "mix", "bypass"}
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid query mode '{mode}'. Allowed modes: {sorted(valid_modes)}")
+
+        query_param = QueryParam(mode=cast(SupportedQueryMode, mode))
         
         answer = await rag.aquery(question, param=query_param)
-        return answer
+        if isinstance(answer, str):
+            return answer
+
+        chunks: list[str] = []
+        async for chunk in answer:
+            chunks.append(chunk)
+        return "".join(chunks)
 
     def get_graph_data(self, user_id: UUID | str) -> dict:
         """
@@ -169,7 +272,7 @@ class LightRAGService:
         import shutil
         
         user_id_str = str(user_id)
-        working_dir = self._get_working_dir(user_id_str)
+        working_dir = os.path.join(settings.lightrag_working_dir, user_id_str)
         
         try:
             # Remove from cache
@@ -182,7 +285,7 @@ class LightRAGService:
             
             return True
         except Exception as e:
-            print(f"Error deleting graph: {str(e)}")
+            logger.error("Error deleting graph: %s", str(e))
             return False
 
 

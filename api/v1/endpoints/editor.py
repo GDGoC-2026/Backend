@@ -1,21 +1,51 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
+from jose import JWTError, jwt
 import json
 
 from Backend.db.session import AsyncSessionLocal
 from Backend.services.judge_controller import JudgeController
 from Backend.services.gamification import GamificationEngine
+from Backend.core.config import settings
+from Backend.core.security import ALGORITHM
+from Backend.models.user import User
 
 router = APIRouter()
 judge_controller = JudgeController()
 
+
+async def _authenticate_websocket_user(websocket: WebSocket) -> User | None:
+    token = websocket.query_params.get("token")
+    if not token:
+        auth_header = websocket.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1]
+
+    if not token:
+        return None
+
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if not email:
+            return None
+    except JWTError:
+        return None
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.email == email))
+        return result.scalar_one_or_none()
+
+
 @router.websocket("/ws/execute")
 async def websocket_endpoint(websocket: WebSocket):
+    user = await _authenticate_websocket_user(websocket)
+    if not user:
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await websocket.accept()
-    
-    # In a production scenario, authenticate the user via token sent over WS here
-    # user_id = await authenticate_ws(websocket)
-    user_id = "placeholder_uuid_for_now" 
+    user_id = str(user.id)
 
     try:
         while True:
