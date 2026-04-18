@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from Backend.api.deps import get_current_user
 from Backend.models.user import User
 from Backend.schemas.knowledge import (
@@ -10,6 +12,7 @@ from Backend.schemas.knowledge import (
 )
 from Backend.services.formatter_agent import format_notes
 from Backend.services.lightrag_service import get_lightrag_service
+from Backend.workers.ingestion_tasks import ingest_lightrag_content
 
 
 router = APIRouter()
@@ -23,6 +26,7 @@ router = APIRouter()
 )
 async def ingest_notes(
     request: NoteIngestRequest,
+    response: Response,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -42,10 +46,30 @@ async def ingest_notes(
         )
         
         # Step 2: Ingest into LightRAG
+        use_background = os.getenv("LIGHTRAG_INGEST_USE_BACKGROUND", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+        if use_background:
+            try:
+                task = ingest_lightrag_content.delay(str(current_user.id), formatted_content)
+                response.status_code = status.HTTP_202_ACCEPTED
+
+                return NoteIngestResponse(
+                    message=f"Notes formatted. Ingestion queued (task_id={task.id})",
+                    formatted_content=formatted_content,
+                    original_content=request.content,
+                )
+            except Exception:
+                # If queue dispatch fails, gracefully fall back to synchronous ingestion.
+                pass
+
         lightrag_service = get_lightrag_service()
         await lightrag_service.ingest_content(
             user_id=current_user.id,
-            content=formatted_content
+            content=formatted_content,
         )
         
         # Step 3: Return response

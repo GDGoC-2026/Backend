@@ -1,16 +1,26 @@
+import asyncio
 import logging
 import os
+import random
+import time
+from collections import deque
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
+from dotenv import load_dotenv
+load_dotenv()
 
 import google.auth
 import networkx as nx
+import numpy as np
 import vertexai
+from google.api_core.exceptions import ResourceExhausted, TooManyRequests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from lightrag import LightRAG, QueryParam
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+from lightrag.llm.openai import create_openai_async_client, openai_complete_if_cache
+from openai import BadRequestError, RateLimitError
 from lightrag.utils import EmbeddingFunc
+from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 
 from Backend.core.config import settings
 from Backend.schemas.knowledge import GraphNode, GraphEdge
@@ -19,6 +29,31 @@ from Backend.schemas.knowledge import GraphNode, GraphEdge
 logger = logging.getLogger(__name__)
 
 SupportedQueryMode = Literal["local", "global", "hybrid", "naive", "mix", "bypass"]
+
+
+class AsyncRateLimiter:
+    """Simple async sliding-window rate limiter."""
+
+    def __init__(self, max_calls: int, period_seconds: float = 60.0):
+        self._max_calls = max(1, max_calls)
+        self._period_seconds = max(1.0, period_seconds)
+        self._timestamps: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                while self._timestamps and now - self._timestamps[0] >= self._period_seconds:
+                    self._timestamps.popleft()
+
+                if len(self._timestamps) < self._max_calls:
+                    self._timestamps.append(now)
+                    return
+
+                wait_seconds = self._period_seconds - (now - self._timestamps[0])
+
+            await asyncio.sleep(max(wait_seconds, 0.01))
 
 
 class LightRAGService:
@@ -30,23 +65,51 @@ class LightRAGService:
     def __init__(self):
         """Initialize the LightRAG service."""
         self._rag_instances: dict[str, LightRAG] = {}
+        self._vertex_embedding_models: dict[str, TextEmbeddingModel] = {}
 
         self._location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
-        self._llm_model_name = os.getenv("LIGHTRAG_LLM_MODEL", "google/gemini-1.5-flash")
-        self._embedding_model_name = os.getenv("LIGHTRAG_EMBEDDING_MODEL", "google/text-embedding-005")
+        self._llm_model_name = os.getenv("LIGHTRAG_LLM_MODEL", "google/gemini-2.5-flash")
+        self._embedding_model_name = os.getenv("LIGHTRAG_EMBEDDING_MODEL", "text-embedding-005")
         self._embedding_dim = int(os.getenv("LIGHTRAG_EMBEDDING_DIM", "768"))
         self._embedding_max_tokens = int(os.getenv("LIGHTRAG_EMBEDDING_MAX_TOKENS", "8192"))
+        self._embedding_batch_num = max(1, int(os.getenv("LIGHTRAG_EMBEDDING_BATCH_NUM", "8")))
+        self._embedding_rate_limit_rpm = max(
+            1,
+            int(os.getenv("LIGHTRAG_EMBEDDING_RATE_LIMIT_RPM", "5")),
+        )
+        self._embedding_max_concurrency = max(
+            1,
+            int(os.getenv("LIGHTRAG_EMBEDDING_MAX_CONCURRENCY", "1")),
+        )
+        self._embedding_retry_attempts = max(
+            1,
+            int(os.getenv("LIGHTRAG_EMBEDDING_RETRY_ATTEMPTS", "6")),
+        )
+        self._embedding_retry_base_delay_seconds = max(
+            0.1,
+            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_BASE_DELAY_SECONDS", "5")),
+        )
+        self._embedding_retry_max_delay_seconds = max(
+            self._embedding_retry_base_delay_seconds,
+            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_MAX_DELAY_SECONDS", "120")),
+        )
+        self._embedding_retry_jitter_ratio = max(
+            0.0,
+            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_JITTER_RATIO", "0.2")),
+        )
         self._llm_max_async = int(os.getenv("LIGHTRAG_LLM_MAX_ASYNC", "1"))
+
+        self._embedding_rate_limiter = AsyncRateLimiter(
+            max_calls=self._embedding_rate_limit_rpm,
+            period_seconds=60.0,
+        )
+        self._embedding_semaphore = asyncio.Semaphore(self._embedding_max_concurrency)
 
         # Acquire Application Default Credentials for Vertex OpenAI-compatible endpoints.
         self._credentials, detected_project = google.auth.default(
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
-        self._project_id = (
-            os.getenv("VERTEX_AI_PROJECT_ID")
-            or os.getenv("GOOGLE_CLOUD_PROJECT")
-            or detected_project
-        )
+        self._project_id = settings.vertex_ai_project_id
         if not self._project_id:
             raise ValueError(
                 "Vertex AI project ID is missing. Set VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT."
@@ -65,6 +128,15 @@ class LightRAGService:
             f"{self._project_id}/locations/{self._location}/endpoints/openapi"
         )
         self._embedding_func = self._build_embedding_func()
+        self._pipeline_initialized = False
+
+        logger.info(
+            "LightRAG embedding controls: batch=%s rpm=%s concurrency=%s retries=%s",
+            self._embedding_batch_num,
+            self._embedding_rate_limit_rpm,
+            self._embedding_max_concurrency,
+            self._embedding_retry_attempts,
+        )
 
     def _get_access_token(self) -> str:
         """Get a fresh OAuth token for Vertex OpenAI-compatible endpoints."""
@@ -104,18 +176,150 @@ class LightRAGService:
         """Create embedding function configured for Vertex OpenAI-compatible endpoint."""
 
         async def _embedding_func(texts: list[str]):
-            return await openai_embed.func(
-                texts,
-                model=self._embedding_model_name,
-                api_key=self._get_access_token(),
-                base_url=self._embedding_base_url,
-            )
+            async with self._embedding_semaphore:
+                return await self._embed_with_resilience(texts)
 
         return EmbeddingFunc(
             embedding_dim=self._embedding_dim,
             max_token_size=self._embedding_max_tokens,
             func=_embedding_func,
         )
+
+    async def _embed_with_resilience(self, texts: list[str]) -> np.ndarray:
+        delay = self._embedding_retry_base_delay_seconds
+        attempt = 1
+
+        while attempt <= self._embedding_retry_attempts:
+            await self._embedding_rate_limiter.acquire()
+
+            try:
+                if not self._is_openai_publisher_model(self._embedding_model_name):
+                    vertex_model_name = self._normalize_vertex_embedding_model_name(
+                        self._embedding_model_name
+                    )
+                    return await asyncio.to_thread(
+                        self._embed_with_vertex_native,
+                        vertex_model_name,
+                        texts,
+                    )
+
+                return await self._embed_with_openai_compatible(texts)
+
+            except Exception as exc:
+                is_retryable = self._is_quota_or_rate_limit_error(exc)
+                if not is_retryable or attempt >= self._embedding_retry_attempts:
+                    raise
+
+                jitter = random.uniform(0.0, delay * self._embedding_retry_jitter_ratio)
+                sleep_seconds = min(self._embedding_retry_max_delay_seconds, delay + jitter)
+                logger.warning(
+                    "Embedding rate/quota limited (attempt %s/%s). Retrying in %.2fs. Error: %s",
+                    attempt,
+                    self._embedding_retry_attempts,
+                    sleep_seconds,
+                    str(exc),
+                )
+                await asyncio.sleep(sleep_seconds)
+                delay = min(self._embedding_retry_max_delay_seconds, delay * 2)
+                attempt += 1
+
+        raise RuntimeError("Embedding failed after retry loop")
+
+    async def _embed_with_openai_compatible(self, texts: list[str]) -> np.ndarray:
+        # Vertex OpenAI-compatible embeddings expect encoding_format="float".
+        openai_async_client = create_openai_async_client(
+            api_key=self._get_access_token(),
+            base_url=self._embedding_base_url,
+        )
+
+        async with openai_async_client:
+            try:
+                response = await openai_async_client.embeddings.create(
+                    model=self._embedding_model_name,
+                    input=texts,
+                    encoding_format="float",
+                )
+            except BadRequestError as exc:
+                fallback_model = (
+                    f"openai/{self._embedding_model_name}"
+                    if "/" not in self._embedding_model_name
+                    else self._embedding_model_name
+                )
+                if (
+                    fallback_model != self._embedding_model_name
+                    and "malformed publisher model" in str(exc).lower()
+                ):
+                    logger.warning(
+                        "Embedding model '%s' malformed, retrying with '%s'",
+                        self._embedding_model_name,
+                        fallback_model,
+                    )
+                    response = await openai_async_client.embeddings.create(
+                        model=fallback_model,
+                        input=texts,
+                        encoding_format="float",
+                    )
+                    self._embedding_model_name = fallback_model
+                else:
+                    raise
+
+        vectors = [np.array(item.embedding, dtype=np.float32) for item in response.data]
+        return np.array(vectors, dtype=np.float32)
+
+    @staticmethod
+    def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
+        if isinstance(exc, (ResourceExhausted, TooManyRequests, RateLimitError)):
+            return True
+
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            return True
+
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "quota exceeded",
+                "resource_exhausted",
+                "too many requests",
+                "rate limit",
+                "statuscode.resource_exhausted",
+                "error code: 429",
+            )
+        )
+
+    @staticmethod
+    def _is_openai_publisher_model(model_name: str) -> bool:
+        """Return True if model is explicitly configured for OpenAI-compatible publisher routing."""
+        return model_name.startswith("openai/")
+
+    @staticmethod
+    def _normalize_vertex_embedding_model_name(model_name: str) -> str:
+        """Normalize model names for native Vertex embedding API."""
+        if model_name.startswith("google/"):
+            return model_name.split("/", 1)[1]
+        return model_name
+
+    def _get_vertex_embedding_model(self, model_name: str) -> TextEmbeddingModel:
+        if model_name not in self._vertex_embedding_models:
+            self._vertex_embedding_models[model_name] = TextEmbeddingModel.from_pretrained(model_name)
+        return self._vertex_embedding_models[model_name]
+
+    def _embed_with_vertex_native(self, model_name: str, texts: list[str]) -> np.ndarray:
+        """Embed text using native Vertex model API for Google publisher models."""
+        model = self._get_vertex_embedding_model(model_name)
+        vertex_texts = cast(list[str | TextEmbeddingInput], texts)
+
+        try:
+            response = model.get_embeddings(vertex_texts, output_dimensionality=self._embedding_dim)
+        except Exception as exc:
+            # Some embedding models may not support explicit output_dimensionality.
+            if "output_dimensionality" not in str(exc).lower():
+                raise
+            response = model.get_embeddings(vertex_texts)
+
+        vectors = [np.array(item.values, dtype=np.float32) for item in response]
+        return np.array(vectors, dtype=np.float32)
 
     def _get_working_dir(self, user_id: UUID | str) -> str:
         """
@@ -133,6 +337,17 @@ class LightRAGService:
         )
         Path(user_working_dir).mkdir(parents=True, exist_ok=True)
         return user_working_dir
+    
+    async def _ensure_initialized(self, rag: LightRAG):
+        if not getattr(rag, "_initialized", False):
+            await rag.initialize_storages()
+
+            if not self._pipeline_initialized:
+                from lightrag.kg.shared_storage import initialize_pipeline_status
+                await initialize_pipeline_status()
+                self._pipeline_initialized = True
+
+            rag._initialized = True # type: ignore
 
     def get_rag_instance(self, user_id: UUID | str) -> LightRAG:
         """
@@ -156,7 +371,7 @@ class LightRAGService:
                 llm_model_name=self._llm_model_name,
                 llm_model_max_async=self._llm_max_async,
                 embedding_func=self._embedding_func,
-                embedding_batch_num=1,
+                embedding_batch_num=self._embedding_batch_num,
             )
         
         return self._rag_instances[user_id_str]
@@ -170,6 +385,7 @@ class LightRAGService:
             content: Formatted content to ingest
         """
         rag = self.get_rag_instance(user_id)
+        await self._ensure_initialized(rag)
         await rag.ainsert(content)
 
     async def query_knowledge(
@@ -190,6 +406,7 @@ class LightRAGService:
             Answer from the knowledge graph
         """
         rag = self.get_rag_instance(user_id)
+        await self._ensure_initialized(rag)
 
         valid_modes = {"local", "global", "hybrid", "naive", "mix", "bypass"}
         if mode not in valid_modes:

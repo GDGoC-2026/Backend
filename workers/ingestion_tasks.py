@@ -62,3 +62,37 @@ def process_markdown_note(self, user_id: str, file_name: str, content: str):
     asyncio.run(mark_note_as_synced(user_id, file_name))
         
     return {"status": "success", "chunks_processed": len(chunks), "file": file_name}
+
+
+@celery_app.task(bind=True, max_retries=5)
+def ingest_lightrag_content(self, user_id: str, content: str):
+    """Queue-friendly LightRAG ingestion task with retry for transient quota limits."""
+    try:
+        from Backend.services.lightrag_service import get_lightrag_service
+
+        asyncio.run(
+            get_lightrag_service().ingest_content(
+                user_id=user_id,
+                content=content,
+            )
+        )
+        return {"status": "success", "user_id": user_id}
+
+    except Exception as exc:
+        message = str(exc).lower()
+        is_retryable = any(
+            token in message
+            for token in (
+                "quota exceeded",
+                "resource_exhausted",
+                "too many requests",
+                "rate limit",
+                "error code: 429",
+            )
+        )
+
+        if is_retryable and self.request.retries < self.max_retries:
+            countdown = min(300, 30 * (2 ** self.request.retries))
+            raise self.retry(exc=exc, countdown=countdown)
+
+        raise

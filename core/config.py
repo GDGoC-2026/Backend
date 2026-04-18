@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     recommendation_threshold: float = 0.5  # Min score to trigger recommendation
     recommendation_trigger_lines: int = 10  # Lines of code/notes to trigger recommendation
 
-    # --- LightRAG / Gemini ---
-    gemini_api_key: str = ""
+    # --- LightRAG ---
+    vertex_ai_project_id: str = ""
     lightrag_working_dir: str = "./lightrag_data"
 
     model_config = SettingsConfigDict(
