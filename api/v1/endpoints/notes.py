@@ -17,6 +17,7 @@ from Backend.workers.ingestion_tasks import process_markdown_note
 
 
 router = APIRouter()
+NOTE_SOURCE_TYPE = "note"
 
 
 async def _validate_owned_folder(
@@ -97,7 +98,11 @@ async def get_folder_details(
         select(Folder).where(Folder.parent_id == folder_id)
     )
     notes_result = await db.execute(
-        select(Note).where(Note.folder_id == folder_id, Note.user_id == current_user.id)
+        select(Note).where(
+            Note.folder_id == folder_id,
+            Note.user_id == current_user.id,
+            Note.source_type == NOTE_SOURCE_TYPE,
+        )
     )
     
     return {
@@ -155,7 +160,8 @@ async def upload_markdown_note(
         user_id=current_user.id,
         title=note_title,
         content=text_content,
-        folder_id=folder_id
+        folder_id=folder_id,
+        source_type=NOTE_SOURCE_TYPE,
     )
     db.add(new_note)
     await db.commit()
@@ -185,8 +191,9 @@ async def get_notes(
     result = await db.execute(
         select(Note)
         .where(
-            Note.user_id == current_user.id, 
-            Note.folder_id == folder_id
+            Note.user_id == current_user.id,
+            Note.source_type == NOTE_SOURCE_TYPE,
+            Note.folder_id == folder_id,
         )
         .order_by(Note.updated_at.desc())
     )
@@ -205,7 +212,8 @@ async def create_note(
         user_id=current_user.id,
         title=note_in.title,
         content=note_in.content,
-        folder_id=note_in.folder_id
+        folder_id=note_in.folder_id,
+        source_type=NOTE_SOURCE_TYPE,
     )
     db.add(new_note)
     await db.commit()
@@ -225,7 +233,13 @@ async def update_note(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Note).where(Note.id == note_id, Note.user_id == current_user.id))
+    result = await db.execute(
+        select(Note).where(
+            Note.id == note_id,
+            Note.user_id == current_user.id,
+            Note.source_type == NOTE_SOURCE_TYPE,
+        )
+    )
     note = result.scalar_one_or_none()
     
     if not note:
@@ -261,7 +275,13 @@ async def get_note(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Note).where(Note.id == note_id, Note.user_id == current_user.id))
+    result = await db.execute(
+        select(Note).where(
+            Note.id == note_id,
+            Note.user_id == current_user.id,
+            Note.source_type == NOTE_SOURCE_TYPE,
+        )
+    )
     note = result.scalar_one_or_none()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -274,7 +294,13 @@ async def delete_note(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Note).where(Note.id == note_id, Note.user_id == current_user.id))
+    result = await db.execute(
+        select(Note).where(
+            Note.id == note_id,
+            Note.user_id == current_user.id,
+            Note.source_type == NOTE_SOURCE_TYPE,
+        )
+    )
     note = result.scalar_one_or_none()
     
     if not note:

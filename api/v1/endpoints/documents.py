@@ -17,6 +17,7 @@ import docx
 
 
 router = APIRouter()
+DOCUMENT_SOURCE_TYPE = "document"
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -33,6 +34,24 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     doc = docx.Document(doc_file)
     text = "\n".join([para.text for para in doc.paragraphs])
     return text
+
+
+async def _get_owned_document_or_404(
+    document_id: UUID,
+    db: AsyncSession,
+    current_user: User,
+) -> Note:
+    result = await db.execute(
+        select(Note).where(
+            Note.id == document_id,
+            Note.user_id == current_user.id,
+            Note.source_type == DOCUMENT_SOURCE_TYPE,
+        )
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
 
 
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED)
@@ -83,7 +102,8 @@ async def upload_general_document(
         user_id=current_user.id,
         title=note_title,
         content=text_content,
-        folder_id=folder_id
+        folder_id=folder_id,
+        source_type=DOCUMENT_SOURCE_TYPE,
     )
     db.add(new_note)
     await db.commit()
@@ -101,3 +121,43 @@ async def upload_general_document(
         "task_id": task.id,
         "document": NoteResponse.model_validate(new_note)
     }
+
+
+@router.get("/", response_model=List[NoteResponse])
+async def get_documents(
+    folder_id: Optional[UUID] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Fetch uploaded documents for the current user, optionally filtered by folder."""
+    query = select(Note).where(
+        Note.user_id == current_user.id,
+        Note.source_type == DOCUMENT_SOURCE_TYPE,
+    )
+    if folder_id is not None:
+        query = query.where(Note.folder_id == folder_id)
+
+    result = await db.execute(query.order_by(Note.updated_at.desc()))
+    return result.scalars().all()
+
+
+@router.get("/{document_id}", response_model=NoteResponse)
+async def get_document(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    document = await _get_owned_document_or_404(document_id, db, current_user)
+    return document
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    document = await _get_owned_document_or_404(document_id, db, current_user)
+    await db.delete(document)
+    await db.commit()
+    return None
