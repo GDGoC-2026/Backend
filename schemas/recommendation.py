@@ -60,5 +60,5 @@ class RecommendationConfig(BaseModel):
     """Configuration for recommendation system"""
     recommendation_threshold: float = Field(default=0.5)
     recommendation_trigger_lines: int = Field(default=10)
-    embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2")
+    embedding_model: str = Field(default="text-embedding-005")
     embedding_dim: int = Field(default=384)

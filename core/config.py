@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     
     # AI & LLM
     gemini_api_key: str = ""
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model: str = "text-embedding-005"
     embedding_dim: int = 384
     
     # Recommendation settings

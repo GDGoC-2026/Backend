@@ -13,6 +13,8 @@ COPY . /app/Backend
 # Make sure the python path understands the Backend module
 ENV PYTHONPATH=/app
 
-EXPOSE 8000
+ENV PORT=1234
 
-CMD ["uvicorn", "Backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 1234
+
+CMD ["sh", "-c", "uvicorn Backend.main:app --host 0.0.0.0 --port ${PORT}"]
