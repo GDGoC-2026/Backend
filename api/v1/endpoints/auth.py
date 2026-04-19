@@ -21,11 +21,11 @@ def _resolve_oauth_redirect_uri(request: Request, provider: str):
     )
     requested_redirect_uri = request.query_params.get("redirect_uri")
 
-    if requested_redirect_uri:
-        return requested_redirect_uri
-
     if configured_redirect_uri:
         return configured_redirect_uri
+
+    if requested_redirect_uri:
+        return requested_redirect_uri
 
     return str(request.url_for(f"{provider}_callback"))
 
