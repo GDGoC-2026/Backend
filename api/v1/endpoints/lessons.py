@@ -35,7 +35,8 @@ from Backend.services.workflows.config import (
     ContentType,
     StudentProfile,
 )
-from Backend.services.workflows.utils.grounding import build_source_context
+from Backend.services.web_research_agent import get_web_research_agent
+from Backend.services.workflows.utils.grounding import build_source_context, chunk_source_material
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -147,9 +148,11 @@ def _build_lesson_pages(
     coding_payload: dict[str, Any] | None,
     mindmap_payload: dict[str, Any] | None,
     include_answer_key: bool,
+    external_sources: list[dict[str, Any]] | None = None,
 ) -> list[LessonPage]:
     pages: list[LessonPage] = []
     order = 1
+    external_sources = external_sources or []
 
     pages.append(
         LessonPage(
@@ -162,6 +165,7 @@ def _build_lesson_pages(
             data={
                 "prompt": prompt,
                 "source_documents": [_to_json_safe(doc.model_dump()) for doc in source_documents],
+                "external_sources": _to_json_safe(external_sources),
             },
         )
     )
@@ -170,6 +174,7 @@ def _build_lesson_pages(
     if lesson_payload:
         lesson_data = lesson_payload.get("lesson", {})
         sections = lesson_payload.get("sections", [])
+        resources = lesson_payload.get("learning_resources", [])
         pages.append(
             LessonPage(
                 page_id="theory",
@@ -187,8 +192,7 @@ def _build_lesson_pages(
         )
         order += 1
 
-        resources = lesson_payload.get("learning_resources", [])
-        if resources:
+        if resources or external_sources:
             pages.append(
                 LessonPage(
                     page_id="resources",
@@ -197,10 +201,30 @@ def _build_lesson_pages(
                     title="Learning Resources",
                     description="Supplementary references for deeper learning.",
                     estimated_time_minutes=5,
-                    data={"items": _to_json_safe(resources)},
+                    data={
+                        "items": _to_json_safe(resources),
+                        "external_sources": _to_json_safe(external_sources),
+                    },
                 )
             )
             order += 1
+
+    if external_sources and not any(page.page_id == "resources" for page in pages):
+        pages.append(
+            LessonPage(
+                page_id="resources",
+                order=order,
+                page_type="resources",
+                title="Learning Resources",
+                description="Supplementary references for deeper learning.",
+                estimated_time_minutes=5,
+                data={
+                    "items": [],
+                    "external_sources": _to_json_safe(external_sources),
+                },
+            )
+        )
+        order += 1
 
     if flashcard_payload:
         flashcards = flashcard_payload.get("flashcards", [])
@@ -476,6 +500,9 @@ async def generate_lesson(
     include_mindmap: bool = Form(default=False),
     include_coding_exercises: bool | None = Form(default=None),
     include_answer_key: bool = Form(default=False),
+    include_external_sources: bool = Form(default=False),
+    external_search_query: str | None = Form(default=None),
+    max_external_sources: int = Form(default=6, ge=1, le=12),
     files: list[UploadFile] | None = File(default=None),
     current_user: User = Depends(get_current_user),
 ):
@@ -520,6 +547,7 @@ async def generate_lesson(
 
     source_documents: list[LessonSourceDocument] = []
     source_materials: list[str] = []
+    external_sources: list[dict[str, str]] = []
     for uploaded_file in files:
         if not uploaded_file.filename:
             continue
@@ -552,7 +580,14 @@ async def generate_lesson(
             )
         )
         if extracted_text:
-            source_materials.append(extracted_text[:8000])
+            source_materials.extend(
+                chunk_source_material(
+                    extracted_text,
+                    chunk_size=2600,
+                    overlap=260,
+                    max_chunks=260,
+                )
+            )
 
     resolved_topic = topic.strip() if topic and topic.strip() else _derive_topic_from_prompt(prompt)
     resolved_subtopics = _parse_list_form_field(subtopics)
@@ -571,8 +606,23 @@ async def generate_lesson(
             f"Assess comprehension through a guided quiz",
         ]
 
+    if include_external_sources:
+        search_seed = external_search_query.strip() if external_search_query and external_search_query.strip() else prompt
+        research_agent = get_web_research_agent()
+        external_sources = await research_agent.research(
+            topic=resolved_topic,
+            prompt=search_seed,
+            subtopics=resolved_subtopics,
+            learning_objectives=resolved_objectives,
+            max_sources=max_external_sources,
+        )
+        source_materials.extend(research_agent.to_source_materials(external_sources))
+
     if source_documents:
         resolved_objectives.append("Incorporate context from uploaded documents in explanations and examples")
+
+    if external_sources:
+        resolved_objectives.append("Use relevant external references to improve accuracy and completeness")
 
     lesson_content_types = [ContentType.LESSON, ContentType.FLASHCARD, ContentType.QUIZ]
     coding_decision_mode = "auto"
@@ -645,6 +695,7 @@ async def generate_lesson(
         coding_payload=coding_payload,
         mindmap_payload=mindmap_payload,
         include_answer_key=include_answer_key,
+        external_sources=external_sources,
     )
 
     if len(pages) <= 1:
