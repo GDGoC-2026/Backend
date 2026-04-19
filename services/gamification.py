@@ -35,7 +35,13 @@ class GamificationEngine:
         stats = result.scalar_one_or_none()
 
         if not stats:
-            stats = UserStats(user_id=user_id, total_xp=0, current_level=1, longest_streak=0)
+            stats = UserStats(
+                user_id=user_id,
+                total_xp=0,
+                current_level=1,
+                current_streak=0,
+                longest_streak=0,
+            )
             db.add(stats)
 
         stats.total_xp += amount
@@ -57,11 +63,23 @@ class GamificationEngine:
     @staticmethod
     async def update_streak(db: AsyncSession, user_id: str) -> dict:
         today = date.today()
-        result = await db.execute(select(DailyStreak).where(DailyStreak.user_id == user_id))
-        streak = result.scalar_one_or_none()
+        streak_result = await db.execute(select(DailyStreak).where(DailyStreak.user_id == user_id))
+        streak = streak_result.scalar_one_or_none()
+
+        stats_result = await db.execute(select(UserStats).where(UserStats.user_id == user_id))
+        stats = stats_result.scalar_one_or_none()
+        if not stats:
+            stats = UserStats(
+                user_id=user_id,
+                total_xp=0,
+                current_level=1,
+                current_streak=0,
+                longest_streak=0,
+            )
+            db.add(stats)
 
         streak_maintained = False
-        current_streak = 1
+        current_streak = max(int(getattr(stats, "current_streak", 0) or 0), 0)
 
         if not streak:
             streak = DailyStreak(user_id=user_id, last_activity_date=today)
@@ -71,7 +89,7 @@ class GamificationEngine:
             delta = today - streak.last_activity_date
             if delta == timedelta(days=1):
                 # Consecutive day
-                current_streak += 1
+                current_streak = max(current_streak, 0) + 1
                 streak.last_activity_date = today
                 streak_maintained = True
             elif delta > timedelta(days=1):
@@ -80,16 +98,21 @@ class GamificationEngine:
                 streak.last_activity_date = today
             else:
                 # Already active today
+                if current_streak <= 0:
+                    current_streak = 1
                 streak_maintained = True
 
-        # Update longest streak stat
-        stats_result = await db.execute(select(UserStats).where(UserStats.user_id == user_id))
-        stats = stats_result.scalar_one_or_none()
-        if stats and current_streak > stats.longest_streak:
+        stats.current_streak = current_streak
+        if current_streak > stats.longest_streak:
             stats.longest_streak = current_streak
 
         await db.commit()
-        return {"current_streak": current_streak, "maintained": streak_maintained}
+        return {
+            "current_streak": current_streak,
+            "longest_streak": stats.longest_streak,
+            "maintained": streak_maintained,
+            "last_activity_date": streak.last_activity_date,
+        }
 
 
     @staticmethod
