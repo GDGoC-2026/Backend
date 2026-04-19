@@ -1,5 +1,6 @@
 import asyncio
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import logging
 from uuid import UUID
 from Backend.core.config import settings
@@ -19,9 +20,9 @@ class RecommendationAgent:
         """Initialize the Recommendation Agent with Gemini API key."""
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is not set in configuration")
-        
-        genai.configure(api_key=settings.gemini_api_key) # type: ignore
-        self.model = genai.GenerativeModel("gemini-2.5-flash") # type: ignore
+
+        self.client = genai.Client(api_key=settings.gemini_api_key)
+        self.model_name = "gemini-2.5-flash"
 
     @staticmethod
     def _resolve_collection_name(content_type: str) -> str:
@@ -69,10 +70,10 @@ class RecommendationAgent:
             
             # Use a worker thread to avoid blocking the event loop with SDK sync calls.
             response = await asyncio.to_thread(
-                self.model.generate_content,
-                f"{system_prompt}\n\nUser Content:\n{content}",
-                stream=False,
-                generation_config=genai.types.GenerationConfig( # type: ignore
+                self.client.models.generate_content,
+                model=self.model_name,
+                contents=f"{system_prompt}\n\nUser Content:\n{content}",
+                config=types.GenerateContentConfig(
                     temperature=0.7,
                     top_p=0.95,
                     top_k=40,
