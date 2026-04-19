@@ -1,4 +1,5 @@
 from typing import List, Dict
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -25,11 +26,29 @@ async def get_my_stats(
     streak = streak_query.scalar_one_or_none()
     
     if not stats:
-        return {"total_xp": 0, "current_level": 1, "longest_streak": 0, "current_streak_date": None}
+        return {
+            "total_xp": 0,
+            "current_level": 1,
+            "current_streak": 0,
+            "longest_streak": 0,
+            "last_activity_date": None,
+        }
+
+    current_streak = int(getattr(stats, "current_streak", 0) or 0)
+    if not streak:
+        current_streak = 0
+    else:
+        delta_days = (date.today() - streak.last_activity_date).days
+        # If user missed at least one full day, current streak is considered broken.
+        if delta_days > 1:
+            current_streak = 0
+        elif current_streak <= 0:
+            current_streak = 1
         
     return {
         "total_xp": stats.total_xp,
         "current_level": stats.current_level,
+        "current_streak": current_streak,
         "longest_streak": stats.longest_streak,
         "last_activity_date": streak.last_activity_date if streak else None
     }

@@ -17,6 +17,7 @@ class UserStats(Base):
     )
     total_xp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    current_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     longest_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 

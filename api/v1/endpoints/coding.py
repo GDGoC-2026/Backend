@@ -26,6 +26,7 @@ from Backend.schemas.coding import (
     CodingTestCase,
     TestCaseResult,
 )
+from Backend.services.gamification import GamificationEngine
 from Backend.services.judge_controller import JudgeController
 from Backend.services.workflows.agents.coding_task_creator import CodingTaskCreatorAgent
 
@@ -458,6 +459,11 @@ async def submit_coding_problem(
     total_tests = int(evaluation_result.get("total_tests", 0))
     passed_tests = int(evaluation_result.get("passed_tests", 0))
 
+    # Count coding submit as learning activity for streak; XP only when accepted.
+    await GamificationEngine.update_streak(db, str(current_user.id))
+    if passed:
+        await GamificationEngine.award_xp(db, str(current_user.id), amount=15)
+
     case_results = [
         _sanitize_test_case_result(result)
         for result in evaluation_result.get("results", [])
@@ -547,6 +553,10 @@ async def submit_coding_problem_stream(
                 language_id=language_id,
                 evaluation_result=evaluation_result,
             )
+
+            await GamificationEngine.update_streak(db, str(current_user.id))
+            if passed:
+                await GamificationEngine.award_xp(db, str(current_user.id), amount=15)
 
             sanitized_results = [
                 _sanitize_test_case_result(result).model_dump(mode="json")

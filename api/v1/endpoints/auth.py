@@ -1,6 +1,5 @@
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Backend.api.deps import get_current_user
@@ -14,6 +13,21 @@ from Backend.services.oauth import oauth
 
 
 router = APIRouter()
+
+
+def _resolve_oauth_redirect_uri(request: Request, provider: str):
+    configured_redirect_uri = (
+        settings.google_redirect_uri if provider == "google" else settings.github_redirect_uri
+    )
+    requested_redirect_uri = request.query_params.get("redirect_uri")
+
+    if requested_redirect_uri:
+        return requested_redirect_uri
+
+    if configured_redirect_uri:
+        return configured_redirect_uri
+
+    return str(request.url_for(f"{provider}_callback"))
 
 
 @router.post("/register", response_model=UserProfile, status_code=201)
@@ -46,7 +60,7 @@ async def me(current_user: User = Depends(get_current_user)):
 async def google_login(request: Request):
     if "google" not in oauth.create_client.__self__._clients:
         raise HTTPException(status_code=400, detail="Google OAuth is not configured")
-    redirect_uri = settings.google_redirect_uri
+    redirect_uri = _resolve_oauth_redirect_uri(request, "google")
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
@@ -77,7 +91,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
 async def github_login(request: Request):
     if "github" not in oauth.create_client.__self__._clients:
         raise HTTPException(status_code=400, detail="GitHub OAuth is not configured")
-    redirect_uri = settings.github_redirect_uri
+    redirect_uri = _resolve_oauth_redirect_uri(request, "github")
     return await oauth.github.authorize_redirect(request, redirect_uri)
 
 
