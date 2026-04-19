@@ -11,6 +11,13 @@ from typing import Any, Dict, List
 import logging
 from ..base import BaseAgent
 from ..config import ContentLevel
+from ..utils.grounding import (
+    extract_focus_terms,
+    extract_keywords,
+    prioritize_phrase_matches,
+    select_relevant_sentences,
+    unique_preserve_order,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,8 @@ class FlashcardCreatorAgent(BaseAgent):
         max_cards = input_data.get("max_cards", 10)
         learning_style = input_data.get("learning_style", "visual")
         customization = input_data.get("content_customization", {})
+        source_context = input_data.get("source_context", "")
+        subtopics = unique_preserve_order(subtopics or [topic])
         
         # Generate flashcards
         flashcards = await self._generate_flashcards(
@@ -55,7 +64,8 @@ class FlashcardCreatorAgent(BaseAgent):
             subtopics=subtopics,
             difficulty=difficulty,
             max_cards=max_cards,
-            learning_objectives=learning_objectives
+            learning_objectives=learning_objectives,
+            source_context=source_context,
         )
         
         # Optimize for each learning style
@@ -95,32 +105,55 @@ class FlashcardCreatorAgent(BaseAgent):
     
     async def _generate_flashcards(self, topic: str, subtopics: List[str],
                                   difficulty: ContentLevel, max_cards: int,
-                                  learning_objectives: List[str]) -> List[Dict[str, Any]]:
+                                  learning_objectives: List[str],
+                                  source_context: str) -> List[Dict[str, Any]]:
         """
         Generate flashcard questions and answers.
         Strategy varies by difficulty level.
         """
         flashcards = []
         cards_per_subtopic = max(1, max_cards // len(subtopics)) if subtopics else max_cards
+        seen_questions: set[str] = set()
+        question_stems = [
+            "What is the main idea behind {subtopic}?",
+            "Why does {subtopic} matter in {topic}?",
+            "How does the lesson describe {subtopic}?",
+            "What practical takeaway should you remember about {subtopic}?",
+        ]
         
         for subtopic in subtopics:
+            source_support = select_relevant_sentences(
+                source_context,
+                extract_keywords(subtopic, topic, *learning_objectives),
+                limit=max(4, cards_per_subtopic + 2),
+            )
+            source_support = prioritize_phrase_matches(
+                source_support,
+                subtopic,
+                limit=max(2, cards_per_subtopic + 1),
+            )
             for i in range(cards_per_subtopic):
                 if len(flashcards) >= max_cards:
                     break
                 
-                # Generate question based on difficulty
-                question = await self._generate_question(
+                reference_sentence = source_support[i % len(source_support)] if source_support else ""
+                question = question_stems[i % len(question_stems)].format(subtopic=subtopic, topic=topic)
+                if difficulty == ContentLevel.ADVANCED and i % 2 == 1:
+                    question = f"Which nuance or trade-off in {subtopic} should an advanced learner remember?"
+                elif difficulty == ContentLevel.BEGINNER and i % 2 == 0:
+                    question = f"What should a beginner understand first about {subtopic}?"
+                
+                answer = await self._generate_answer(
                     subtopic=subtopic,
                     difficulty=difficulty,
-                    card_number=i
+                    reference_sentence=reference_sentence,
+                    learning_objectives=learning_objectives,
                 )
-                
-                # Generate answer
-                answer = await self._generate_answer(
-                    question=question,
-                    subtopic=subtopic,
-                    difficulty=difficulty
-                )
+
+                signature = question.casefold()
+                if signature in seen_questions:
+                    continue
+                seen_questions.add(signature)
                 
                 flashcards.append({
                     "id": len(flashcards) + 1,
@@ -135,41 +168,24 @@ class FlashcardCreatorAgent(BaseAgent):
         
         return flashcards[:max_cards]
     
-    async def _generate_question(self, subtopic: str, difficulty: ContentLevel,
-                                card_number: int) -> str:
-        """Generate a question appropriate for the difficulty level"""
-        question_types = {
-            "definition": f"What is {subtopic}?",
-            "example": f"Give an example of {subtopic}.",
-            "application": f"How would you apply {subtopic} in practice?",
-            "comparison": f"Compare {subtopic} with related concepts.",
-            "why": f"Why is {subtopic} important?",
-        }
-        
-        if difficulty == ContentLevel.BEGINNER:
-            return question_types["definition"]
-        elif difficulty == ContentLevel.INTERMEDIATE:
-            return question_types.get("example" if card_number % 2 == 0 else "why", 
-                                     question_types["definition"])
-        else:  # ADVANCED
-            return question_types.get("application" if card_number % 2 == 0 else "comparison",
-                                     question_types["why"])
-    
-    async def _generate_answer(self, question: str, subtopic: str,
-                             difficulty: ContentLevel) -> str:
+    async def _generate_answer(self, subtopic: str,
+                             difficulty: ContentLevel,
+                             reference_sentence: str,
+                             learning_objectives: List[str]) -> str:
         """Generate an appropriate answer"""
-        # This would normally call an LLM like Gemini
-        # For now, create a template
-        base_answer = f"Answer about {subtopic}"
-        
+        if reference_sentence:
+            base_answer = reference_sentence
+        else:
+            base_answer = learning_objectives[0] if learning_objectives else f"Key idea about {subtopic}"
+
         if difficulty == ContentLevel.BEGINNER:
             return f"Simple explanation: {base_answer}"
         elif difficulty == ContentLevel.INTERMEDIATE:
-            return f"Detailed explanation: {base_answer}. Key points: ..., ..., ..."
+            return f"Detailed explanation: {base_answer}"
         else:
-            return f"Advanced analysis: {base_answer}. Consider: nuances, edge cases, applications"
+            return f"Advanced analysis: {base_answer} Consider the assumptions, trade-offs, and when it breaks down."
     
-    async def _determine_card_type(self, question: str) -> str:
+    def _determine_card_type(self, question: str) -> str:
         """Determine the type of flashcard"""
         if "what" in question.lower() or "define" in question.lower():
             return "definition"
@@ -208,11 +224,13 @@ class FlashcardCreatorAgent(BaseAgent):
         Add memory aids and mnemonic devices
         """
         for card in flashcards:
+            focus_terms = extract_focus_terms(card["answer"], [card["subtopic"]], limit=3)
             # Create hints
+            hint_source = focus_terms or [card["subtopic"], "main idea", "evidence"]
             card["hints"] = [
-                f"Hint 1: Related to {card['subtopic']}",
-                f"Hint 2: Think about the main concept",
-                f"Hint 3: Review the definition"
+                f"Hint 1: Focus on {hint_source[0]}",
+                f"Hint 2: Connect it back to {card['subtopic']}",
+                f"Hint 3: Recall the strongest evidence from the lesson",
             ]
             
             # Create memory cue

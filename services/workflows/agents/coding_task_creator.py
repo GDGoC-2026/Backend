@@ -191,36 +191,59 @@ class CodingTaskCreatorAgent(BaseAgent):
         language_id: int,
         index: int,
     ) -> Dict[str, Any]:
-        function_name = f"solve_{self._slug(subtopic)}"
-
         if language == "javascript":
             starting_code = (
-                f"function {function_name}(input) {{\n"
-                "  // TODO: implement\n"
-                "  return input.trim().toUpperCase();\n"
-                "}\n\n"
-                "module.exports = { " + function_name + " };\n"
-            )
-            solution_code = (
-                f"function {function_name}(input) {{\n"
-                "  const normalized = input.trim();\n"
+                "const fs = require(\"fs\");\n\n"
+                "function solve(rawInput) {\n"
+                "  // TODO: implement here\n"
+                "  const normalized = rawInput.trim();\n"
                 "  return normalized.toUpperCase();\n"
                 "}\n\n"
-                "module.exports = { " + function_name + " };\n"
+                "const input = fs.readFileSync(0, \"utf8\");\n"
+                "const output = solve(input);\n"
+                "process.stdout.write(String(output));\n"
+            )
+            solution_code = (
+                "const fs = require(\"fs\");\n\n"
+                "function solve(rawInput) {\n"
+                "  const normalized = rawInput.trim();\n"
+                "  return normalized.toUpperCase();\n"
+                "}\n\n"
+                "const input = fs.readFileSync(0, \"utf8\");\n"
+                "const output = solve(input);\n"
+                "process.stdout.write(String(output));\n"
             )
         elif language == "java":
             starting_code = (
+                "import java.io.BufferedReader;\n"
+                "import java.io.InputStreamReader;\n"
+                "import java.util.stream.Collectors;\n\n"
                 "public class Main {\n"
-                f"    public static String {function_name}(String input) {{\n"
-                "        // TODO: implement\n"
-                "        return input.trim().toUpperCase();\n"
+                "    static String solve(String rawInput) {\n"
+                "        // TODO: implement here\n"
+                "        String normalized = rawInput.trim();\n"
+                "        return normalized.toUpperCase();\n"
+                "    }\n\n"
+                "    public static void main(String[] args) throws Exception {\n"
+                "        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));\n"
+                "        String input = reader.lines().collect(Collectors.joining(\"\\n\"));\n"
+                "        System.out.print(solve(input));\n"
                 "    }\n"
                 "}\n"
             )
             solution_code = (
+                "import java.io.BufferedReader;\n"
+                "import java.io.InputStreamReader;\n"
+                "import java.util.stream.Collectors;\n\n"
                 "public class Main {\n"
-                f"    public static String {function_name}(String input) {{\n"
-                "        return input.trim().toUpperCase();\n"
+                "    static String solve(String rawInput) {\n"
+                "        String normalized = rawInput.trim();\n"
+                "        return normalized.toUpperCase();\n"
+                "    }\n\n"
+                "    public static void main(String[] args) throws Exception {\n"
+                "        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));\n"
+                "        String input = reader.lines().collect(Collectors.joining(\"\\n\"));\n"
+                "        System.out.print(solve(input));\n"
                 "    }\n"
                 "}\n"
             )
@@ -228,41 +251,71 @@ class CodingTaskCreatorAgent(BaseAgent):
             starting_code = (
                 "#include <bits/stdc++.h>\n"
                 "using namespace std;\n\n"
-                f"string {function_name}(string input) {{\n"
-                "    // TODO: implement\n"
-                "    for (char &c : input) c = (char)toupper(c);\n"
-                "    return input;\n"
+                "string solve(const string& rawInput) {\n"
+                "    // TODO: implement here\n"
+                "    string normalized = rawInput;\n"
+                "    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };\n"
+                "    while (!normalized.empty() && is_space((unsigned char)normalized.back())) normalized.pop_back();\n"
+                "    size_t left = 0;\n"
+                "    while (left < normalized.size() && is_space((unsigned char)normalized[left])) left++;\n"
+                "    normalized = normalized.substr(left);\n"
+                "    for (char& ch : normalized) ch = (char)toupper((unsigned char)ch);\n"
+                "    return normalized;\n"
+                "}\n\n"
+                "int main() {\n"
+                "    ios::sync_with_stdio(false);\n"
+                "    cin.tie(nullptr);\n\n"
+                "    string input((istreambuf_iterator<char>(cin)), istreambuf_iterator<char>());\n"
+                "    cout << solve(input);\n"
+                "    return 0;\n"
                 "}\n"
             )
             solution_code = (
                 "#include <bits/stdc++.h>\n"
                 "using namespace std;\n\n"
-                f"string {function_name}(string input) {{\n"
-                "    string s = input;\n"
-                "    while (!s.empty() && isspace((unsigned char)s.back())) s.pop_back();\n"
+                "string solve(const string& rawInput) {\n"
+                "    string normalized = rawInput;\n"
+                "    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };\n"
+                "    while (!normalized.empty() && is_space((unsigned char)normalized.back())) normalized.pop_back();\n"
                 "    size_t left = 0;\n"
-                "    while (left < s.size() && isspace((unsigned char)s[left])) left++;\n"
-                "    s = s.substr(left);\n"
-                "    for (char &c : s) c = (char)toupper((unsigned char)c);\n"
-                "    return s;\n"
+                "    while (left < normalized.size() && is_space((unsigned char)normalized[left])) left++;\n"
+                "    normalized = normalized.substr(left);\n"
+                "    for (char& ch : normalized) ch = (char)toupper((unsigned char)ch);\n"
+                "    return normalized;\n"
+                "}\n\n"
+                "int main() {\n"
+                "    ios::sync_with_stdio(false);\n"
+                "    cin.tie(nullptr);\n\n"
+                "    string input((istreambuf_iterator<char>(cin)), istreambuf_iterator<char>());\n"
+                "    cout << solve(input);\n"
+                "    return 0;\n"
                 "}\n"
             )
         else:
             starting_code = (
-                f"def {function_name}(input_text: str) -> str:\n"
-                "    # TODO: implement\n"
-                "    return input_text.strip().upper()\n"
+                "import sys\n\n"
+                "def solve(raw_input: str) -> str:\n"
+                "    # TODO: implement here\n"
+                "    normalized = raw_input.strip()\n"
+                "    return normalized.upper()\n\n"
+                "if __name__ == \"__main__\":\n"
+                "    data = sys.stdin.read()\n"
+                "    sys.stdout.write(solve(data))\n"
             )
             solution_code = (
-                f"def {function_name}(input_text: str) -> str:\n"
-                "    normalized = input_text.strip()\n"
-                "    return normalized.upper()\n"
+                "import sys\n\n"
+                "def solve(raw_input: str) -> str:\n"
+                "    normalized = raw_input.strip()\n"
+                "    return normalized.upper()\n\n"
+                "if __name__ == \"__main__\":\n"
+                "    data = sys.stdin.read()\n"
+                "    sys.stdout.write(solve(data))\n"
             )
 
         test_cases = [
             {"input": "hello", "expected_output": "HELLO", "is_hidden": False},
             {"input": "  world  ", "expected_output": "WORLD", "is_hidden": False},
-            {"input": f"{topic[:20]}", "expected_output": topic[:20].upper(), "is_hidden": True},
+            {"input": f" {topic[:20]} ", "expected_output": topic[:20].upper(), "is_hidden": True},
         ]
 
         return {
@@ -270,15 +323,19 @@ class CodingTaskCreatorAgent(BaseAgent):
             "language": language,
             "language_id": language_id,
             "instructions": (
-                f"Write a function named {function_name} for {subtopic or topic}. "
-                "Trim surrounding spaces and convert the input string to uppercase."
+                "Read raw text from stdin, trim leading/trailing whitespace, convert it to uppercase, "
+                "and print the final string to stdout."
+            ),
+            "description": (
+                f"Implement a complete program for {subtopic or topic}. "
+                "Use stdin/stdout format like competitive programming platforms."
             ),
             "starting_code": starting_code,
             "solution_code": solution_code,
             "test_cases": test_cases,
             "hints": [
-                "Use built-in string trimming methods.",
-                "Convert the full normalized string to uppercase before returning.",
+                "Read all text from stdin so your program works with spaces and multiple lines.",
+                "Normalize by trimming whitespace first, then convert the full string to uppercase.",
             ],
             "difficulty": str(getattr(difficulty, "value", difficulty)),
         }

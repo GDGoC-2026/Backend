@@ -35,6 +35,7 @@ from Backend.services.workflows.config import (
     ContentType,
     StudentProfile,
 )
+from Backend.services.workflows.utils.grounding import build_source_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -105,7 +106,14 @@ def _extract_document_text(file_name: str, file_bytes: bytes) -> tuple[str, str]
     else:
         text = file_bytes.decode("utf-8")
 
-    return text.strip(), suffix
+    cleaned = text.strip()
+
+    if suffix == ".pdf" and not cleaned:
+        raise ValueError(
+            "No selectable text could be extracted from this PDF. Text-based PDFs are supported, but scanned/image PDFs and embedded images/formulas are not currently OCR'd."
+        )
+
+    return cleaned, suffix
 
 
 def _to_json_safe(value: Any) -> Any:
@@ -214,11 +222,6 @@ def _build_lesson_pages(
 
     if quiz_payload:
         questions = [_to_json_safe(question) for question in quiz_payload.get("questions", [])]
-        if not include_answer_key:
-            for question in questions:
-                if isinstance(question, dict):
-                    question.pop("correct_answer", None)
-                    question.pop("correct_answers", None)
 
         pages.append(
             LessonPage(
@@ -516,6 +519,7 @@ async def generate_lesson(
         requested_quiz_types = ["multiple_choice", "fill_blank", "true_false"]
 
     source_documents: list[LessonSourceDocument] = []
+    source_materials: list[str] = []
     for uploaded_file in files:
         if not uploaded_file.filename:
             continue
@@ -547,6 +551,8 @@ async def generate_lesson(
                 excerpt=extracted_text[:600] if extracted_text else None,
             )
         )
+        if extracted_text:
+            source_materials.append(extracted_text[:8000])
 
     resolved_topic = topic.strip() if topic and topic.strip() else _derive_topic_from_prompt(prompt)
     resolved_subtopics = _parse_list_form_field(subtopics)
@@ -569,8 +575,12 @@ async def generate_lesson(
         resolved_objectives.append("Incorporate context from uploaded documents in explanations and examples")
 
     lesson_content_types = [ContentType.LESSON, ContentType.FLASHCARD, ContentType.QUIZ]
+    coding_decision_mode = "auto"
     if include_coding_exercises is not False:
         lesson_content_types.append(ContentType.CODING_TASK)
+        coding_decision_mode = "force" if include_coding_exercises is True else "auto"
+    else:
+        coding_decision_mode = "skip"
     if include_mindmap:
         lesson_content_types.append(ContentType.MINDMAP)
 
@@ -593,8 +603,12 @@ async def generate_lesson(
         subtopics=resolved_subtopics,
         learning_objectives=resolved_objectives,
         content_types=lesson_content_types,
+        prompt=prompt,
+        source_materials=source_materials,
+        source_context=build_source_context(prompt, source_materials),
         max_items=max_quiz_questions,
         quiz_question_types=requested_quiz_types,
+        coding_decision_mode=coding_decision_mode,
     )
 
     try:
