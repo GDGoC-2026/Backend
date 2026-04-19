@@ -9,6 +9,7 @@ from Backend.schemas.knowledge import (
     KnowledgeQueryRequest,
     KnowledgeQueryResponse,
     GraphDataResponse,
+    IngestStatusResponse,
 )
 from Backend.services.formatter_agent import format_notes
 from Backend.services.lightrag_service import get_lightrag_service
@@ -191,4 +192,27 @@ async def delete_graph(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting graph: {str(e)}"
+        )
+
+
+@router.get(
+    "/ingest-status",
+    response_model=IngestStatusResponse,
+    summary="Get ingestion status for notes and graph"
+)
+async def get_ingest_status(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retrieve ingestion pipeline status for the current user,
+    including counts and per-document processing state.
+    """
+    try:
+        lightrag_service = get_lightrag_service()
+        status_data = lightrag_service.get_ingest_status(user_id=current_user.id)
+        return IngestStatusResponse(**status_data)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving ingest status: {str(e)}"
         )

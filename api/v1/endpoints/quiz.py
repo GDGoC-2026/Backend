@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -108,7 +109,94 @@ def _normalize_text(value: Any, case_sensitive: bool) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
+    replacements = {
+        "−": "-",
+        "–": "-",
+        "—": "-",
+        "×": "*",
+        "·": "*",
+        "÷": "/",
+        "π": "pi",
+        "√": "sqrt",
+        "²": "^2",
+        "³": "^3",
+        "₀": "0",
+        "₁": "1",
+        "₂": "2",
+        "₃": "3",
+        "₄": "4",
+        "₅": "5",
+        "₆": "6",
+        "₇": "7",
+        "₈": "8",
+        "₉": "9",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+
+    text = " ".join(text.split())
     return text if case_sensitive else text.lower()
+
+
+def _compact_answer_text(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    compact = value.casefold()
+    compact = re.sub(r"\b(the|a|an)\b", "", compact)
+    compact = compact.replace(" ", "")
+    compact = compact.replace(",", "")
+    compact = compact.replace(";", "")
+    compact = compact.replace(":", "")
+    compact = compact.replace("the", "")
+    compact = compact.replace("a", "")
+    compact = compact.replace("an", "")
+    compact = compact.replace("_", "")
+    compact = compact.replace("\\", "")
+    compact = compact.replace("{", "(").replace("}", ")")
+    return compact
+
+
+def _tokenize_answer_text(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {
+        token
+        for token in re.findall(r"[a-z0-9^*/()+.=+-]+", value.casefold())
+        if token
+    }
+
+
+def _answers_match(user_answer: Any, expected_answer: Any, case_sensitive: bool) -> bool:
+    normalized_user = _normalize_text(user_answer, case_sensitive)
+    normalized_expected = _normalize_text(expected_answer, case_sensitive)
+
+    if normalized_user is None or normalized_expected is None:
+        return False
+
+    if normalized_user == normalized_expected:
+        return True
+
+    compact_user = _compact_answer_text(normalized_user)
+    compact_expected = _compact_answer_text(normalized_expected)
+
+    if compact_user and compact_expected and compact_user == compact_expected:
+        return True
+
+    if compact_user and compact_expected:
+        if len(compact_user) >= 4 and compact_user in compact_expected:
+            return True
+        if len(compact_expected) >= 4 and compact_expected in compact_user:
+            return True
+
+    user_tokens = _tokenize_answer_text(normalized_user)
+    expected_tokens = _tokenize_answer_text(normalized_expected)
+    if user_tokens and expected_tokens and user_tokens == expected_tokens:
+        return True
+    if user_tokens and expected_tokens and expected_tokens.issubset(user_tokens):
+        return True
+
+    return False
 
 
 def _parse_option_index(answer: Any, options: list[str] | None) -> int | None:
@@ -200,16 +288,11 @@ def _grade_single_question(
         expected_answers = question.correct_answers or []
         if not expected_answers and question.correct_answer is not None:
             expected_answers = [str(question.correct_answer)]
+        expected_answers = list(dict.fromkeys(str(answer) for answer in expected_answers if answer is not None))
 
-        normalized_user = _normalize_text(user_answer, case_sensitive)
-        normalized_expected = {
-            _normalize_text(answer, case_sensitive)
+        is_correct = any(
+            _answers_match(user_answer, answer, case_sensitive)
             for answer in expected_answers
-        }
-
-        is_correct = (
-            normalized_user is not None
-            and normalized_user in normalized_expected
         )
         return is_correct, expected_answers
 

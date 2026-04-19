@@ -1,7 +1,9 @@
+import json
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,11 +35,9 @@ judge_controller = JudgeController()
 
 
 def _ensure_sandbox_access(current_user: User) -> None:
-    if current_user.subscription_tier not in ["developer", "enterprise"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Developer or Enterprise tier required for sandbox execution.",
-        )
+    # Temporary: allow sandbox execution for all tiers while coding workspace is being integrated.
+    # TODO: restore tier-based access control once frontend gating and UX are in place.
+    return None
 
 
 def _problem_to_summary(problem: CodingProblem) -> CodingProblemSummary:
@@ -170,6 +170,41 @@ def _sanitize_test_case_result(raw: dict[str, Any]) -> TestCaseResult:
         memory=raw.get("memory"),
         is_hidden=is_hidden,
     )
+
+
+async def _persist_submit_attempt(
+    db: AsyncSession,
+    current_user: User,
+    problem: CodingProblem,
+    source_code: str,
+    language_id: int,
+    evaluation_result: dict[str, Any],
+) -> CodingAttempt:
+    passed = bool(evaluation_result.get("passed", False))
+    total_tests = int(evaluation_result.get("total_tests", 0))
+    passed_tests = int(evaluation_result.get("passed_tests", 0))
+
+    attempt = CodingAttempt(
+        user_id=current_user.id,
+        coding_problem_id=problem.id,
+        mode="submit",
+        source_code=source_code,
+        language_id=language_id,
+        overall_status=str(evaluation_result.get("status", "Unknown")),
+        passed=passed,
+        total_tests=total_tests,
+        passed_tests=passed_tests,
+        result_summary={
+            "passed": passed,
+            "total_tests": total_tests,
+            "passed_tests": passed_tests,
+        },
+        raw_result=evaluation_result,
+    )
+    db.add(attempt)
+    await db.commit()
+    await db.refresh(attempt)
+    return attempt
 
 
 @router.post(
@@ -398,36 +433,30 @@ async def submit_coding_problem(
             detail="Coding problem has no test cases",
         )
 
-    evaluation_result = await judge_controller.evaluate_test_cases(
+    try:
+        evaluation_result = await judge_controller.evaluate_test_cases(
+            source_code=payload.source_code,
+            language_id=language_id,
+            test_cases=test_cases,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Judge service unavailable or execution failed: {str(exc)}",
+        ) from exc
+
+    attempt = await _persist_submit_attempt(
+        db=db,
+        current_user=current_user,
+        problem=problem,
         source_code=payload.source_code,
         language_id=language_id,
-        test_cases=test_cases,
+        evaluation_result=evaluation_result,
     )
 
     passed = bool(evaluation_result.get("passed", False))
     total_tests = int(evaluation_result.get("total_tests", 0))
     passed_tests = int(evaluation_result.get("passed_tests", 0))
-
-    attempt = CodingAttempt(
-        user_id=current_user.id,
-        coding_problem_id=problem.id,
-        mode="submit",
-        source_code=payload.source_code,
-        language_id=language_id,
-        overall_status=str(evaluation_result.get("status", "Unknown")),
-        passed=passed,
-        total_tests=total_tests,
-        passed_tests=passed_tests,
-        result_summary={
-            "passed": passed,
-            "total_tests": total_tests,
-            "passed_tests": passed_tests,
-        },
-        raw_result=evaluation_result,
-    )
-    db.add(attempt)
-    await db.commit()
-    await db.refresh(attempt)
 
     case_results = [
         _sanitize_test_case_result(result)
@@ -442,6 +471,108 @@ async def submit_coding_problem(
         passed_tests=passed_tests,
         status=evaluation_result.get("status"),
         results=case_results,
+    )
+
+
+@router.post("/coding-problems/{problem_id:uuid}/submit/stream")
+async def submit_coding_problem_stream(
+    problem_id: UUID,
+    payload: CodeSubmitRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_sandbox_access(current_user)
+    problem = await _get_coding_problem_or_404(db, problem_id, current_user.id)
+    language_id = payload.language_id or problem.language_id
+    test_cases = problem.test_cases or []
+
+    if not test_cases:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Coding problem has no test cases",
+        )
+
+    async def generate_sse():
+        try:
+            total_tests = len(test_cases)
+            passed_tests = 0
+            case_results: list[dict[str, Any]] = []
+
+            yield f"data: {json.dumps({'status': 'started', 'total_tests': total_tests})}\n\n"
+
+            async for case_result in judge_controller.iter_test_case_results(
+                source_code=payload.source_code,
+                language_id=language_id,
+                test_cases=test_cases,
+            ):
+                case_results.append(case_result)
+                if bool(case_result.get("passed", False)):
+                    passed_tests += 1
+
+                safe_case_result = _sanitize_test_case_result(case_result).model_dump(mode="json")
+                case_payload = {
+                    "status": "case",
+                    "case_result": safe_case_result,
+                    "passed_tests": passed_tests,
+                    "total_tests": total_tests,
+                }
+                yield f"data: {json.dumps(case_payload)}\n\n"
+
+            passed = total_tests > 0 and passed_tests == total_tests
+            overall_status = "Accepted" if passed else "Wrong Answer"
+            for result in case_results:
+                if result.get("compile_output"):
+                    overall_status = "Compilation Error"
+                    break
+                if result.get("status") and str(result.get("status")).lower() not in {
+                    "accepted",
+                    "wrong answer",
+                } and not result.get("passed", False):
+                    overall_status = str(result.get("status"))
+                    break
+
+            evaluation_result = {
+                "passed": passed,
+                "total_tests": total_tests,
+                "passed_tests": passed_tests,
+                "status": overall_status,
+                "results": case_results,
+            }
+
+            attempt = await _persist_submit_attempt(
+                db=db,
+                current_user=current_user,
+                problem=problem,
+                source_code=payload.source_code,
+                language_id=language_id,
+                evaluation_result=evaluation_result,
+            )
+
+            sanitized_results = [
+                _sanitize_test_case_result(result).model_dump(mode="json")
+                for result in case_results
+            ]
+            completed_payload = {
+                "status": "completed",
+                "attempt_id": str(attempt.id),
+                "passed": passed,
+                "total_tests": total_tests,
+                "passed_tests": passed_tests,
+                "result_status": overall_status,
+                "results": sanitized_results,
+            }
+            yield f"data: {json.dumps(completed_payload)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'status': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

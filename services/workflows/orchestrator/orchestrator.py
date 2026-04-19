@@ -177,6 +177,9 @@ class ExerciseOrchestrator(CoordinatorAgent):
             "subject": request.student_profile.subject,
             "subtopics": request.subtopics,
             "learning_objectives": request.learning_objectives,
+            "prompt": request.prompt,
+            "source_materials": request.source_materials,
+            "source_context": request.source_context,
             "difficulty": persona_output.get("recommended_difficulty"),
             "learning_style": request.student_profile.learning_style,
             "content_customization": persona_output.get("content_customization"),
@@ -232,6 +235,7 @@ class ExerciseOrchestrator(CoordinatorAgent):
             coding_task_input = {
                 **base_input,
                 "max_tasks": max(1, min(5, request.max_items)),
+                "decision_mode": request.coding_decision_mode,
             }
             tasks.append(
                 self._execute_agent_with_timeout(

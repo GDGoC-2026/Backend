@@ -2,7 +2,7 @@
 Workflow configuration and constants
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
 
@@ -46,9 +46,13 @@ class ContentGenerationRequest:
     subtopics: list[str]
     learning_objectives: list[str]
     content_types: list[ContentType]
+    prompt: str = ""
+    source_materials: list[str] = field(default_factory=list)
+    source_context: str = ""
     difficulty_level: Optional[ContentLevel] = None
     max_items: int = 10
     quiz_question_types: Optional[list[str]] = None
+    coding_decision_mode: str = "auto"  # auto | force | skip
 
 
 @dataclass

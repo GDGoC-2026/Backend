@@ -45,3 +45,25 @@ class GraphDataResponse(BaseModel):
     """Response schema for complete graph data visualization."""
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+
+
+class IngestDocumentStatus(BaseModel):
+    """Represents ingestion status for one document in LightRAG pipeline."""
+    doc_id: str
+    status: str
+    chunks_count: int = 0
+    content_summary: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    error: str | None = None
+
+
+class IngestStatusResponse(BaseModel):
+    """Aggregated ingestion status for the current user."""
+    total_docs: int
+    processing_docs: int
+    processed_docs: int
+    failed_docs: int
+    graph_nodes: int
+    graph_edges: int
+    documents: list[IngestDocumentStatus]

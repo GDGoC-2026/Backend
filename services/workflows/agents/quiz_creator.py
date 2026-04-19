@@ -11,6 +11,14 @@ from typing import Any, Dict, List
 import logging
 from ..base import BaseAgent
 from ..config import ContentLevel
+from ..utils.grounding import (
+    extract_focus_terms,
+    extract_keywords,
+    prioritize_phrase_matches,
+    replace_first_case_insensitive,
+    select_relevant_sentences,
+    unique_preserve_order,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +57,8 @@ class QuizCreatorAgent(BaseAgent):
         max_questions = input_data.get("max_questions", 10)
         question_types = input_data.get("question_types", 
                                        ["multiple_choice", "fill_blank", "true_false"])
+        source_context = input_data.get("source_context", "")
+        subtopics = unique_preserve_order(subtopics or [topic])
         
         # Generate questions
         questions = await self._generate_questions(
@@ -57,7 +67,8 @@ class QuizCreatorAgent(BaseAgent):
             learning_objectives=learning_objectives,
             difficulty=difficulty,
             max_questions=max_questions,
-            question_types=question_types
+            question_types=question_types,
+            source_context=source_context,
         )
         
         # Create quiz structure
@@ -100,88 +111,179 @@ class QuizCreatorAgent(BaseAgent):
                                  learning_objectives: List[str],
                                  difficulty: ContentLevel,
                                  max_questions: int,
-                                 question_types: List[str]) -> List[Dict[str, Any]]:
+                                 question_types: List[str],
+                                 source_context: str) -> List[Dict[str, Any]]:
         """Generate questions across different types"""
-        questions = []
-        questions_per_type = max(1, max_questions // len(question_types))
-        
-        for qtype in question_types:
-            for i in range(questions_per_type):
-                if len(questions) >= max_questions:
-                    break
-                
-                # Select subtopic
-                subtopic = subtopics[i % len(subtopics)] if subtopics else topic
-                
-                if qtype == "multiple_choice":
-                    question = await self._create_multiple_choice(
-                        topic=topic,
-                        subtopic=subtopic,
-                        difficulty=difficulty
-                    )
-                elif qtype == "fill_blank":
-                    question = await self._create_fill_blank(
-                        topic=topic,
-                        subtopic=subtopic,
-                        difficulty=difficulty
-                    )
-                elif qtype == "true_false":
-                    question = await self._create_true_false(
-                        topic=topic,
-                        subtopic=subtopic,
-                        difficulty=difficulty
-                    )
-                else:
-                    continue
-                
+        questions: List[Dict[str, Any]] = []
+        normalized_types = unique_preserve_order(question_types) or [
+            "multiple_choice",
+            "fill_blank",
+            "true_false",
+        ]
+        subtopics = unique_preserve_order(subtopics or [topic])
+        seen_signatures: set[str] = set()
+        attempts = 0
+        max_attempts = max_questions * max(4, len(normalized_types) * 2)
+
+        sentence_bank = {
+            subtopic: prioritize_phrase_matches(
+                select_relevant_sentences(
+                    source_context,
+                    extract_keywords(subtopic, topic, *learning_objectives),
+                    limit=max(6, max_questions + 2),
+                ),
+                subtopic,
+                limit=max(4, max_questions),
+            )
+            for subtopic in subtopics
+        }
+
+        all_sentences = unique_preserve_order(
+            sentence for sentences in sentence_bank.values() for sentence in sentences
+        )
+
+        while len(questions) < max_questions and attempts < max_attempts:
+            qtype = normalized_types[attempts % len(normalized_types)]
+            subtopic = subtopics[attempts % len(subtopics)] if subtopics else topic
+            reference_pool = sentence_bank.get(subtopic) or all_sentences
+            reference_sentence = (
+                reference_pool[(attempts // max(1, len(normalized_types))) % len(reference_pool)]
+                if reference_pool
+                else ""
+            )
+
+            if qtype == "multiple_choice":
+                question = await self._create_multiple_choice(
+                    topic=topic,
+                    subtopic=subtopic,
+                    difficulty=difficulty,
+                    reference_sentence=reference_sentence,
+                    distractor_pool=all_sentences,
+                )
+            elif qtype == "fill_blank":
+                question = await self._create_fill_blank(
+                    topic=topic,
+                    subtopic=subtopic,
+                    difficulty=difficulty,
+                    reference_sentence=reference_sentence,
+                )
+            elif qtype == "true_false":
+                question = await self._create_true_false(
+                    topic=topic,
+                    subtopic=subtopic,
+                    difficulty=difficulty,
+                    reference_sentence=reference_sentence,
+                    alternate_subtopics=subtopics,
+                    attempt_index=attempts,
+                )
+            else:
+                attempts += 1
+                continue
+
+            signature = f"{question['type']}::{question['question']}".casefold()
+            if signature not in seen_signatures:
+                seen_signatures.add(signature)
                 question["id"] = len(questions) + 1
                 question["subtopic"] = subtopic
                 questions.append(question)
+
+            attempts += 1
         
         return questions[:max_questions]
     
     async def _create_multiple_choice(self, topic: str, subtopic: str,
-                                     difficulty: ContentLevel) -> Dict[str, Any]:
+                                     difficulty: ContentLevel,
+                                     reference_sentence: str,
+                                     distractor_pool: List[str]) -> Dict[str, Any]:
         """Create a multiple choice question"""
         num_options = 4 if difficulty == ContentLevel.ADVANCED else 3
-        
+        correct_option = (
+            reference_sentence
+            if reference_sentence
+            else f"{subtopic} is a meaningful part of {topic}."
+        )
+        distractors = [
+            sentence
+            for sentence in distractor_pool
+            if sentence != correct_option and subtopic.casefold() not in sentence.casefold()
+        ][: max(0, num_options - 1)]
+
+        generic_distractors = [
+            f"{subtopic} has no practical impact in {topic}.",
+            f"{subtopic} should always be ignored when studying {topic}.",
+            f"{subtopic} only matters in unrelated domains.",
+        ]
+
+        options = unique_preserve_order([correct_option, *distractors, *generic_distractors])[:num_options]
+
         return {
             "type": "multiple_choice",
-            "question": f"Which of the following best describes {subtopic}?",
-            "options": [
-                f"Option A - Correct answer about {subtopic}",
-                f"Option B - Common misconception",
-                f"Option C - Related but incorrect",
-            ] + (["Option D - Distractor"] if num_options == 4 else []),
+            "question": f"Which statement best matches the lesson's explanation of {subtopic}?",
+            "options": options,
             "correct_answer": 0,
-            "explanation": f"The correct answer is A because...",
+            "explanation": f"The correct answer is grounded in the lesson context for {subtopic}.",
             "difficulty": difficulty,
             "learning_value": "Tests understanding and discrimination between concepts",
         }
     
     async def _create_fill_blank(self, topic: str, subtopic: str,
-                                distance: ContentLevel) -> Dict[str, Any]:
+                                difficulty: ContentLevel,
+                                reference_sentence: str) -> Dict[str, Any]:
         """Create a fill-in-the-blank question"""
+        focus_terms = extract_focus_terms(reference_sentence, [subtopic, topic], limit=3)
+        answer_term = next(
+            (
+                term
+                for term in focus_terms
+                if len(term) > 3 and term.casefold() not in {topic.casefold()}
+            ),
+            subtopic,
+        )
+        question_text = (
+            replace_first_case_insensitive(reference_sentence, answer_term, "___________")
+            if reference_sentence and answer_term.casefold() in reference_sentence.casefold()
+            else f"In this lesson, {subtopic} is closely connected to ___________."
+        )
+
         return {
             "type": "fill_blank",
-            "question": f"The key concept in {subtopic} is _________.",
+            "question": question_text,
             "blank_index": 1,
-            "correct_answers": ["fundamental principle", "core concept"],
-            "explanation": f"The blank should be filled with a fundamental principle because...",
-            "difficulty": distance,
+            "correct_answers": [answer_term],
+            "explanation": f"The missing term comes directly from the lesson's description of {subtopic}.",
+            "difficulty": difficulty,
             "learning_value": "Tests recall and vocabulary",
         }
     
     async def _create_true_false(self, topic: str, subtopic: str,
-                                difficulty: ContentLevel) -> Dict[str, Any]:
+                                difficulty: ContentLevel,
+                                reference_sentence: str,
+                                alternate_subtopics: List[str],
+                                attempt_index: int) -> Dict[str, Any]:
         """Create a true/false question"""
+        is_true = attempt_index % 2 == 0 or not reference_sentence
+        statement = reference_sentence or f"{subtopic} is an important concept in {topic}."
+
+        if not is_true:
+            replacement = next(
+                (
+                    alternate
+                    for alternate in alternate_subtopics
+                    if alternate.casefold() != subtopic.casefold()
+                ),
+                "",
+            )
+            if replacement and subtopic.casefold() in statement.casefold():
+                statement = replace_first_case_insensitive(statement, subtopic, replacement)
+            else:
+                statement = f"The lesson says {subtopic} has no effect on {topic}."
+
         return {
             "type": "true_false",
-            "question": f"{subtopic} is a fundamental concept in {topic}.",
-            "correct_answer": True,
+            "question": statement,
+            "correct_answer": is_true,
             "explanation": (
-                f"This is TRUE because {subtopic} is indeed fundamental. "
-                "Common misconception: students might think it's secondary."
+                "Judge whether the statement matches the grounded lesson context."
             ),
             "difficulty": difficulty,
             "learning_value": "Tests conceptual understanding and common misconceptions",
@@ -227,10 +329,10 @@ class QuizCreatorAgent(BaseAgent):
         for question in questions:
             # Check required fields
             quality_checks = [
-                "question" in question and question["question"],
-                "type" in question and question["type"],
+                "question" in question and bool(question["question"]),
+                "type" in question and bool(question["type"]),
                 "difficulty" in question,
-                "explanation" in question and question["explanation"],
+                "explanation" in question and bool(question["explanation"]),
             ]
             
             # Type-specific checks

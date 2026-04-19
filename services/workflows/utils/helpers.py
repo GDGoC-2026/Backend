@@ -64,6 +64,9 @@ def create_content_generation_request(
     subtopics: List[str],
     learning_objectives: List[str],
     content_types: List[str],
+    prompt: str = "",
+    source_materials: List[str] | None = None,
+    source_context: str = "",
     difficulty_level: str | None = None,
     max_items: int = 10,
     quiz_question_types: List[str] | None = None,
@@ -77,6 +80,9 @@ def create_content_generation_request(
         subtopics: Specific subtopics to cover
         learning_objectives: Learning goals/objectives
         content_types: Types of content to generate ("flashcard", "mindmap", "quiz", "lesson")
+        prompt: Original prompt from the user
+        source_materials: Extracted source documents or notes
+        source_context: Concatenated prompt and source text for grounding
         difficulty_level: Override difficulty (default: from persona analysis)
         max_items: Maximum items per content type
         quiz_question_types: Optional quiz question types (multiple_choice, fill_blank, true_false)
@@ -97,6 +103,9 @@ def create_content_generation_request(
         subtopics=subtopics,
         learning_objectives=learning_objectives,
         content_types=parsed_content_types,
+        prompt=prompt,
+        source_materials=source_materials or [],
+        source_context=source_context,
         difficulty_level=difficulty,
         max_items=max_items,
         quiz_question_types=quiz_question_types,

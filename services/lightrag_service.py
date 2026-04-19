@@ -1,11 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import random
 import time
 from collections import deque
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, Optional, cast
 from uuid import UUID
 from dotenv import load_dotenv
 load_dotenv()
@@ -15,15 +16,16 @@ import networkx as nx
 import numpy as np
 import vertexai
 from google.api_core.exceptions import ResourceExhausted, TooManyRequests
+from google.auth.exceptions import DefaultCredentialsError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.openai import create_openai_async_client, openai_complete_if_cache
-from openai import BadRequestError, RateLimitError
+from openai import BadRequestError, NotFoundError, RateLimitError
 from lightrag.utils import EmbeddingFunc
 from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 
 from Backend.core.config import settings
-from Backend.schemas.knowledge import GraphNode, GraphEdge
+from Backend.schemas.knowledge import GraphEdge, GraphNode, IngestDocumentStatus
 
 
 logger = logging.getLogger(__name__)
@@ -66,81 +68,151 @@ class LightRAGService:
         """Initialize the LightRAG service."""
         self._rag_instances: dict[str, LightRAG] = {}
         self._vertex_embedding_models: dict[str, TextEmbeddingModel] = {}
+        self._use_vertex = False
+        self._credentials = None
+        self._auth_request = GoogleAuthRequest()
+        self._project_id: Optional[str] = None
 
         self._location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
         self._llm_model_name = os.getenv("LIGHTRAG_LLM_MODEL", "google/gemini-2.5-flash")
         self._embedding_model_name = os.getenv("LIGHTRAG_EMBEDDING_MODEL", "text-embedding-005")
+        self._gemini_api_key = settings.gemini_api_key or os.getenv("GEMINI_API_KEY", "")
+        self._gemini_embedding_fallback_models: list[str] = []
+        self._gemini_embedding_dim = int(os.getenv("LIGHTRAG_GEMINI_EMBEDDING_DIM", "3072"))
         self._embedding_dim = int(os.getenv("LIGHTRAG_EMBEDDING_DIM", "768"))
         self._embedding_max_tokens = int(os.getenv("LIGHTRAG_EMBEDDING_MAX_TOKENS", "8192"))
-        self._embedding_batch_num = max(1, int(os.getenv("LIGHTRAG_EMBEDDING_BATCH_NUM", "8")))
+        self._embedding_batch_num = max(1, int(os.getenv("LIGHTRAG_EMBEDDING_BATCH_NUM", "32")))
         self._embedding_rate_limit_rpm = max(
             1,
-            int(os.getenv("LIGHTRAG_EMBEDDING_RATE_LIMIT_RPM", "5")),
+            int(os.getenv("LIGHTRAG_EMBEDDING_RATE_LIMIT_RPM", "120")),
         )
         self._embedding_max_concurrency = max(
             1,
-            int(os.getenv("LIGHTRAG_EMBEDDING_MAX_CONCURRENCY", "1")),
+            int(os.getenv("LIGHTRAG_EMBEDDING_MAX_CONCURRENCY", "4")),
         )
         self._embedding_retry_attempts = max(
             1,
-            int(os.getenv("LIGHTRAG_EMBEDDING_RETRY_ATTEMPTS", "6")),
+            int(os.getenv("LIGHTRAG_EMBEDDING_RETRY_ATTEMPTS", "3")),
         )
         self._embedding_retry_base_delay_seconds = max(
             0.1,
-            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_BASE_DELAY_SECONDS", "5")),
+            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_BASE_DELAY_SECONDS", "1")),
         )
         self._embedding_retry_max_delay_seconds = max(
             self._embedding_retry_base_delay_seconds,
-            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_MAX_DELAY_SECONDS", "120")),
+            float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_MAX_DELAY_SECONDS", "15")),
         )
         self._embedding_retry_jitter_ratio = max(
             0.0,
             float(os.getenv("LIGHTRAG_EMBEDDING_RETRY_JITTER_RATIO", "0.2")),
         )
-        self._llm_max_async = int(os.getenv("LIGHTRAG_LLM_MAX_ASYNC", "1"))
+        self._llm_max_async = int(os.getenv("LIGHTRAG_LLM_MAX_ASYNC", "4"))
+        self._openai_timeout_seconds = max(
+            5.0,
+            float(os.getenv("LIGHTRAG_OPENAI_TIMEOUT_SECONDS", "45")),
+        )
+        self._openai_max_retries = max(
+            0,
+            int(os.getenv("LIGHTRAG_OPENAI_MAX_RETRIES", "1")),
+        )
 
         self._embedding_rate_limiter = AsyncRateLimiter(
             max_calls=self._embedding_rate_limit_rpm,
             period_seconds=60.0,
         )
         self._embedding_semaphore = asyncio.Semaphore(self._embedding_max_concurrency)
-
-        # Acquire Application Default Credentials for Vertex OpenAI-compatible endpoints.
-        self._credentials, detected_project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
-        self._project_id = settings.vertex_ai_project_id
-        if not self._project_id:
-            raise ValueError(
-                "Vertex AI project ID is missing. Set VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT."
-            )
-
-        self._auth_request = GoogleAuthRequest()
-        self._get_access_token()
-        vertexai.init(project=self._project_id, location=self._location)
-
-        self._chat_base_url = (
-            f"https://{self._location}-aiplatform.googleapis.com/v1beta1/projects/"
-            f"{self._project_id}/locations/{self._location}/endpoints/openapi"
-        )
-        self._embedding_base_url = (
-            f"https://{self._location}-aiplatform.googleapis.com/v1/projects/"
-            f"{self._project_id}/locations/{self._location}/endpoints/openapi"
-        )
-        self._embedding_func = self._build_embedding_func()
         self._pipeline_initialized = False
 
+        self._configure_model_endpoints()
+        self._embedding_func = self._build_embedding_func()
+
         logger.info(
-            "LightRAG embedding controls: batch=%s rpm=%s concurrency=%s retries=%s",
+            "LightRAG provider=%s controls: batch=%s rpm=%s concurrency=%s retries=%s",
+            "vertex" if self._use_vertex else "gemini-key",
             self._embedding_batch_num,
             self._embedding_rate_limit_rpm,
             self._embedding_max_concurrency,
             self._embedding_retry_attempts,
         )
 
+    def _configure_model_endpoints(self) -> None:
+        """
+        Configure auth and endpoints.
+
+        Priority:
+        1) Vertex AI via ADC + project id.
+        2) Gemini API key (OpenAI-compatible endpoint) fallback.
+        """
+        vertex_project_id = settings.vertex_ai_project_id or os.getenv("VERTEX_AI_PROJECT_ID", "")
+
+        if vertex_project_id:
+            try:
+                self._credentials, _ = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                self._project_id = vertex_project_id
+                self._get_access_token()
+                vertexai.init(project=self._project_id, location=self._location)
+
+                self._chat_base_url = (
+                    f"https://{self._location}-aiplatform.googleapis.com/v1beta1/projects/"
+                    f"{self._project_id}/locations/{self._location}/endpoints/openapi"
+                )
+                self._embedding_base_url = (
+                    f"https://{self._location}-aiplatform.googleapis.com/v1/projects/"
+                    f"{self._project_id}/locations/{self._location}/endpoints/openapi"
+                )
+                self._use_vertex = True
+                return
+            except DefaultCredentialsError:
+                logger.warning(
+                    "Vertex AI project is configured but ADC is missing. Falling back to GEMINI_API_KEY."
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Vertex AI initialization failed (%s). Falling back to GEMINI_API_KEY when available.",
+                    str(exc),
+                )
+
+        if self._gemini_api_key:
+            self._use_vertex = False
+            self._chat_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            self._embedding_base_url = self._chat_base_url
+            self._embedding_dim = self._gemini_embedding_dim
+
+            # Normalize model names for Gemini OpenAI-compatible endpoint.
+            self._llm_model_name = self._normalize_gemini_model_name(self._llm_model_name)
+            gemini_embedding_model = os.getenv("LIGHTRAG_GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+            self._embedding_model_name = self._normalize_gemini_model_name(gemini_embedding_model)
+
+            configured_fallbacks = os.getenv(
+                "LIGHTRAG_GEMINI_EMBEDDING_FALLBACKS",
+                "gemini-embedding-001",
+            )
+            self._gemini_embedding_fallback_models = [
+                self._normalize_gemini_model_name(item)
+                for item in configured_fallbacks.split(",")
+                if item.strip()
+            ]
+            return
+
+        raise ValueError(
+            "LightRAG is not configured. Provide either:\n"
+            "- Vertex setup: VERTEX_AI_PROJECT_ID + Application Default Credentials (ADC), or\n"
+            "- GEMINI_API_KEY for OpenAI-compatible Gemini fallback."
+        )
+
     def _get_access_token(self) -> str:
-        """Get a fresh OAuth token for Vertex OpenAI-compatible endpoints."""
+        """Get auth token for Vertex (ADC) or API key for Gemini fallback."""
+        if not self._use_vertex:
+            if not self._gemini_api_key:
+                raise ValueError("GEMINI_API_KEY is missing for Gemini fallback.")
+            return self._gemini_api_key
+
         try:
+            if not self._credentials:
+                raise ValueError("ADC credentials are not initialized.")
+
             if not self._credentials.token or not self._credentials.valid:
                 self._credentials.refresh(self._auth_request)
 
@@ -161,7 +233,7 @@ class LightRAGService:
         history_messages: list[dict] | None = None,
         **kwargs,
     ) -> str:
-        """LLM function passed to LightRAG using Vertex OpenAI-compatible chat endpoint."""
+        """LLM function passed to LightRAG using configured OpenAI-compatible endpoint."""
         return await openai_complete_if_cache(
             self._llm_model_name,
             prompt,
@@ -169,6 +241,10 @@ class LightRAGService:
             history_messages=history_messages,
             api_key=self._get_access_token(),
             base_url=self._chat_base_url,
+            openai_client_configs={
+                "max_retries": self._openai_max_retries,
+                "timeout": self._openai_timeout_seconds,
+            },
             **kwargs,
         )
 
@@ -193,17 +269,38 @@ class LightRAGService:
             await self._embedding_rate_limiter.acquire()
 
             try:
-                if not self._is_openai_publisher_model(self._embedding_model_name):
+                started_at = time.perf_counter()
+                if self._use_vertex and not self._is_openai_publisher_model(self._embedding_model_name):
                     vertex_model_name = self._normalize_vertex_embedding_model_name(
                         self._embedding_model_name
                     )
-                    return await asyncio.to_thread(
+                    vectors = await asyncio.to_thread(
                         self._embed_with_vertex_native,
                         vertex_model_name,
                         texts,
                     )
+                    elapsed = time.perf_counter() - started_at
+                    if elapsed >= 3:
+                        logger.info(
+                            "Slow embedding batch detected: size=%s provider=%s model=%s duration=%.2fs",
+                            len(texts),
+                            "vertex" if self._use_vertex else "gemini-key",
+                            self._embedding_model_name,
+                            elapsed,
+                        )
+                    return vectors
 
-                return await self._embed_with_openai_compatible(texts)
+                vectors = await self._embed_with_openai_compatible(texts)
+                elapsed = time.perf_counter() - started_at
+                if elapsed >= 3:
+                    logger.info(
+                        "Slow embedding batch detected: size=%s provider=%s model=%s duration=%.2fs",
+                        len(texts),
+                        "vertex" if self._use_vertex else "gemini-key",
+                        self._embedding_model_name,
+                        elapsed,
+                    )
+                return vectors
 
             except Exception as exc:
                 is_retryable = self._is_quota_or_rate_limit_error(exc)
@@ -226,10 +323,14 @@ class LightRAGService:
         raise RuntimeError("Embedding failed after retry loop")
 
     async def _embed_with_openai_compatible(self, texts: list[str]) -> np.ndarray:
-        # Vertex OpenAI-compatible embeddings expect encoding_format="float".
+        # Both Vertex and Gemini OpenAI-compatible embeddings expect encoding_format="float".
         openai_async_client = create_openai_async_client(
             api_key=self._get_access_token(),
             base_url=self._embedding_base_url,
+            client_configs={
+                "max_retries": self._openai_max_retries,
+                "timeout": self._openai_timeout_seconds,
+            },
         )
 
         async with openai_async_client:
@@ -239,6 +340,15 @@ class LightRAGService:
                     input=texts,
                     encoding_format="float",
                 )
+            except NotFoundError as exc:
+                if not self._use_vertex:
+                    response = await self._try_gemini_embedding_fallback_models(
+                        openai_async_client=openai_async_client,
+                        texts=texts,
+                        original_error=exc,
+                    )
+                else:
+                    raise
             except BadRequestError as exc:
                 fallback_model = (
                     f"openai/{self._embedding_model_name}"
@@ -246,6 +356,8 @@ class LightRAGService:
                     else self._embedding_model_name
                 )
                 if (
+                    self._use_vertex
+                    and
                     fallback_model != self._embedding_model_name
                     and "malformed publisher model" in str(exc).lower()
                 ):
@@ -260,11 +372,49 @@ class LightRAGService:
                         encoding_format="float",
                     )
                     self._embedding_model_name = fallback_model
+                elif not self._use_vertex and "not found" in str(exc).lower():
+                    response = await self._try_gemini_embedding_fallback_models(
+                        openai_async_client=openai_async_client,
+                        texts=texts,
+                        original_error=exc,
+                    )
                 else:
                     raise
 
         vectors = [np.array(item.embedding, dtype=np.float32) for item in response.data]
         return np.array(vectors, dtype=np.float32)
+
+    async def _try_gemini_embedding_fallback_models(
+        self,
+        openai_async_client,
+        texts: list[str],
+        original_error: Exception,
+    ):
+        """Try alternative Gemini embedding models when current model is unavailable."""
+        tried = {self._embedding_model_name}
+
+        for model_name in self._gemini_embedding_fallback_models:
+            if model_name in tried:
+                continue
+            tried.add(model_name)
+
+            try:
+                response = await openai_async_client.embeddings.create(
+                    model=model_name,
+                    input=texts,
+                    encoding_format="float",
+                )
+                logger.warning(
+                    "Gemini embedding model '%s' unavailable, switched to '%s'",
+                    self._embedding_model_name,
+                    model_name,
+                )
+                self._embedding_model_name = model_name
+                return response
+            except Exception:
+                continue
+
+        raise original_error
 
     @staticmethod
     def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
@@ -299,6 +449,16 @@ class LightRAGService:
         if model_name.startswith("google/"):
             return model_name.split("/", 1)[1]
         return model_name
+
+    @staticmethod
+    def _normalize_gemini_model_name(model_name: str) -> str:
+        """Normalize model names for Gemini OpenAI-compatible endpoint."""
+        normalized = model_name.strip()
+        if normalized.startswith("google/"):
+            normalized = normalized.split("/", 1)[1]
+        if normalized.startswith("openai/"):
+            normalized = normalized.split("/", 1)[1]
+        return normalized
 
     def _get_vertex_embedding_model(self, model_name: str) -> TextEmbeddingModel:
         if model_name not in self._vertex_embedding_models:
@@ -436,45 +596,265 @@ class LightRAGService:
         """
         working_dir = self._get_working_dir(user_id)
         graph_file = os.path.join(working_dir, "graph_chunk_entity_relation.graphml")
-        
-        nodes = []
-        edges = []
-        
-        if os.path.exists(graph_file):
-            try:
-                # Load GraphML file
-                graph = nx.read_graphml(graph_file)
-                
-                # Extract nodes
-                for node_id, node_data in graph.nodes(data=True):
-                    node_label = node_data.get("description", node_id)
-                    nodes.append(
-                        GraphNode(
-                            id=node_id,
-                            label=node_label,
-                            properties=dict(node_data)
-                        )
-                    )
-                
-                # Extract edges
-                for source, target, edge_data in graph.edges(data=True):
-                    edge_label = edge_data.get("description", "related")
-                    edges.append(
-                        GraphEdge(
-                            source=source,
-                            target=target,
-                            label=edge_label,
-                            properties=dict(edge_data)
-                        )
-                    )
-            except Exception as e:
-                # Log error but return empty graph
-                print(f"Error parsing graph file: {str(e)}")
-        
+
+        nodes, edges = self._load_graph_from_graphml(graph_file)
+        if not nodes:
+            fallback_nodes, fallback_edges = self._load_graph_from_kv_stores(working_dir)
+            if fallback_nodes:
+                nodes = fallback_nodes
+                edges = fallback_edges
+
         return {
             "nodes": nodes,
             "edges": edges
         }
+
+    def get_ingest_status(self, user_id: UUID | str) -> dict:
+        """
+        Retrieve ingestion pipeline statuses for the current user.
+
+        Returns:
+            Aggregated status counts and per-document statuses.
+        """
+        working_dir = self._get_working_dir(user_id)
+        status_file = os.path.join(working_dir, "kv_store_doc_status.json")
+
+        documents: list[IngestDocumentStatus] = []
+        processing_docs = 0
+        processed_docs = 0
+        failed_docs = 0
+        now_timestamp = int(time.time())
+        stale_processing_seconds = max(
+            60,
+            int(os.getenv("LIGHTRAG_STALE_PROCESSING_SECONDS", "600")),
+        )
+
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8") as file_handle:
+                    raw_statuses = json.load(file_handle)
+
+                if isinstance(raw_statuses, dict):
+                    for doc_id, payload in raw_statuses.items():
+                        if not isinstance(payload, dict):
+                            continue
+
+                        status_value = str(payload.get("status", "unknown")).lower()
+                        metadata = payload.get("metadata", {})
+                        processing_start = None
+                        if isinstance(metadata, dict):
+                            raw_start = metadata.get("processing_start_time")
+                            if raw_start is not None:
+                                try:
+                                    processing_start = int(raw_start)
+                                except (TypeError, ValueError):
+                                    processing_start = None
+
+                        if (
+                            status_value == "processing"
+                            and processing_start is not None
+                            and now_timestamp - processing_start > stale_processing_seconds
+                        ):
+                            status_value = "failed"
+
+                        if status_value == "processing":
+                            processing_docs += 1
+                        elif status_value == "processed":
+                            processed_docs += 1
+                        elif status_value == "failed":
+                            failed_docs += 1
+
+                        error_message = payload.get("error")
+                        if error_message is None and isinstance(metadata, dict):
+                            error_message = metadata.get("error")
+                        if error_message is None and status_value == "failed":
+                            error_message = "Processing timed out. Please ingest again or reset graph."
+
+                        documents.append(
+                            IngestDocumentStatus(
+                                doc_id=str(doc_id),
+                                status=status_value,
+                                chunks_count=int(payload.get("chunks_count", 0) or 0),
+                                content_summary=payload.get("content_summary"),
+                                created_at=payload.get("created_at"),
+                                updated_at=payload.get("updated_at"),
+                                error=str(error_message) if error_message else None,
+                            )
+                        )
+            except Exception as exc:
+                logger.warning("Failed to parse LightRAG status file '%s': %s", status_file, str(exc))
+
+        documents.sort(
+            key=lambda item: item.updated_at or item.created_at or "",
+            reverse=True,
+        )
+
+        graph_data = self.get_graph_data(user_id)
+
+        return {
+            "total_docs": len(documents),
+            "processing_docs": processing_docs,
+            "processed_docs": processed_docs,
+            "failed_docs": failed_docs,
+            "graph_nodes": len(graph_data["nodes"]),
+            "graph_edges": len(graph_data["edges"]),
+            "documents": documents,
+        }
+
+    @staticmethod
+    def _to_graph_label(value: object, fallback: str) -> str:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped if stripped else fallback
+        if value is None:
+            return fallback
+        return str(value)
+
+    def _load_graph_from_graphml(self, graph_file: str) -> tuple[list[GraphNode], list[GraphEdge]]:
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+
+        if not os.path.exists(graph_file):
+            return nodes, edges
+
+        try:
+            graph = nx.read_graphml(graph_file)
+
+            for node_id, node_data in graph.nodes(data=True):
+                node_id_text = self._to_graph_label(node_id, "node")
+                node_label = self._to_graph_label(node_data.get("description"), node_id_text)
+                nodes.append(
+                    GraphNode(
+                        id=node_id_text,
+                        label=node_label,
+                        properties=dict(node_data),
+                    )
+                )
+
+            for source, target, edge_data in graph.edges(data=True):
+                source_id = self._to_graph_label(source, "source")
+                target_id = self._to_graph_label(target, "target")
+                edge_label = self._to_graph_label(edge_data.get("description"), "related")
+                edges.append(
+                    GraphEdge(
+                        source=source_id,
+                        target=target_id,
+                        label=edge_label,
+                        properties=dict(edge_data),
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Error parsing graph file '%s': %s", graph_file, str(exc))
+
+        return nodes, edges
+
+    def _load_graph_from_kv_stores(self, working_dir: str) -> tuple[list[GraphNode], list[GraphEdge]]:
+        entities_file = os.path.join(working_dir, "kv_store_full_entities.json")
+        relations_file = os.path.join(working_dir, "kv_store_full_relations.json")
+
+        if not os.path.exists(entities_file):
+            return [], []
+
+        try:
+            with open(entities_file, "r", encoding="utf-8") as file_handle:
+                entities_payload = json.load(file_handle)
+        except Exception as exc:
+            logger.warning("Unable to parse entities store '%s': %s", entities_file, str(exc))
+            return [], []
+
+        relations_payload: dict = {}
+        if os.path.exists(relations_file):
+            try:
+                with open(relations_file, "r", encoding="utf-8") as file_handle:
+                    loaded = json.load(file_handle)
+                    if isinstance(loaded, dict):
+                        relations_payload = loaded
+            except Exception as exc:
+                logger.warning("Unable to parse relations store '%s': %s", relations_file, str(exc))
+
+        if not isinstance(entities_payload, dict):
+            return [], []
+
+        node_map: dict[str, GraphNode] = {}
+        for doc_id, payload in entities_payload.items():
+            if not isinstance(payload, dict):
+                continue
+            entity_names = payload.get("entity_names", [])
+            if not isinstance(entity_names, list):
+                continue
+
+            for entity_name in entity_names:
+                if not isinstance(entity_name, str):
+                    continue
+
+                entity_id = entity_name.strip()
+                if not entity_id or entity_id in node_map:
+                    continue
+
+                node_map[entity_id] = GraphNode(
+                    id=entity_id,
+                    label=entity_id,
+                    properties={
+                        "doc_id": str(doc_id),
+                        "source": "kv_store_full_entities",
+                    },
+                )
+
+        edges: list[GraphEdge] = []
+        dedupe_edges: set[tuple[str, str]] = set()
+
+        for doc_id, payload in relations_payload.items():
+            if not isinstance(payload, dict):
+                continue
+            relation_pairs = payload.get("relation_pairs", [])
+            if not isinstance(relation_pairs, list):
+                continue
+
+            for relation in relation_pairs:
+                if not isinstance(relation, list) or len(relation) < 2:
+                    continue
+
+                source = relation[0] if isinstance(relation[0], str) else None
+                target = relation[1] if isinstance(relation[1], str) else None
+                if not source or not target:
+                    continue
+
+                source_id = source.strip()
+                target_id = target.strip()
+                if not source_id or not target_id:
+                    continue
+
+                if source_id not in node_map:
+                    node_map[source_id] = GraphNode(
+                        id=source_id,
+                        label=source_id,
+                        properties={"source": "kv_store_full_relations"},
+                    )
+                if target_id not in node_map:
+                    node_map[target_id] = GraphNode(
+                        id=target_id,
+                        label=target_id,
+                        properties={"source": "kv_store_full_relations"},
+                    )
+
+                edge_key = (source_id, target_id)
+                if edge_key in dedupe_edges:
+                    continue
+
+                dedupe_edges.add(edge_key)
+                edges.append(
+                    GraphEdge(
+                        source=source_id,
+                        target=target_id,
+                        label="related",
+                        properties={
+                            "doc_id": str(doc_id),
+                            "source": "kv_store_full_relations",
+                        },
+                    )
+                )
+
+        return list(node_map.values()), edges
 
     def delete_graph(self, user_id: UUID | str) -> bool:
         """
