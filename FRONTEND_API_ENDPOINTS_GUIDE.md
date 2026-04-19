@@ -268,7 +268,8 @@ async function streamRecommendations(token: string, payload: any, onChunk: (text
 Important implementation details for `POST /lessons/generate`:
 - Use `FormData`, not JSON.
 - Required field: `prompt` (minimum 10 chars).
-- Optional fields include: `topic`, `subject`, `subtopics`, `learning_objectives`, `current_level`, `learning_style`, `learning_pace`, `daily_study_time_minutes`, `max_quiz_questions`, `quiz_question_types`, `include_mindmap`, `include_coding_exercises`, `include_answer_key`, and uploaded `files`.
+- Optional fields include: `topic`, `subject`, `subtopics`, `learning_objectives`, `current_level`, `learning_style`, `learning_pace`, `daily_study_time_minutes`, `max_quiz_questions`, `quiz_question_types`, `include_mindmap`, `include_coding_exercises`, `include_answer_key`, `include_external_sources`, `external_search_query`, `max_external_sources`, and uploaded `files`.
+- When `include_external_sources=true`, the backend performs web research and includes matched references under `overview.data.external_sources` and `resources.data.external_sources`.
 
 `FormData` example:
 
@@ -277,6 +278,8 @@ const fd = new FormData();
 fd.append("prompt", prompt);
 fd.append("topic", topic);
 fd.append("include_mindmap", String(includeMindmap));
+fd.append("include_external_sources", "true");
+fd.append("max_external_sources", "6");
 for (const file of files) fd.append("files", file);
 ```
 
