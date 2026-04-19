@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from Backend.api.v1.router import api_router
@@ -10,11 +11,40 @@ from Backend.core.config import settings
 from Backend.services.oauth import register_oauth_providers
 from Backend.db.vector import init_milvus, disconnect_milvus, create_default_collections
 from Backend.db.graph import neo4j_db
+from lightrag.kg.shared_storage import (
+    finalize_share_data,
+    initialize_pipeline_status,
+    initialize_share_data,
+)
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_lightrag_workers() -> int:
+    """
+    Resolve worker count for LightRAG shared storage.
+
+    Default to 1 (single-process mode) for stability unless explicitly overridden
+    via LIGHTRAG_SHARED_STORAGE_WORKERS.
+    """
+    value = os.getenv("LIGHTRAG_SHARED_STORAGE_WORKERS")
+    if value:
+        try:
+            return max(1, int(value))
+        except ValueError:
+            logger.warning(
+                "Invalid LIGHTRAG_SHARED_STORAGE_WORKERS=%s; fallback to single-process mode",
+                value,
+            )
+    return 1
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize LightRAG shared storage before serving requests.
+    lightrag_workers = _resolve_lightrag_workers()
+    initialize_share_data(workers=lightrag_workers)
+    await initialize_pipeline_status()
+
     if settings.milvus_uri:
         try:
             logger.info("Connecting to Milvus...")
@@ -33,6 +63,7 @@ async def lifespan(app: FastAPI):
     try:
         disconnect_milvus()
         await neo4j_db.close()
+        finalize_share_data()
     except Exception as e:
         logger.warning(f"Shutdown error: {e}")
 
