@@ -598,13 +598,37 @@ class LightRAGService:
             await self._ensure_initialized(rag)
             answer = await rag.aquery(question, param=query_param)
 
+        if answer is None:
+            logger.warning(
+                "LightRAG returned None for user=%s mode=%s question=%s",
+                user_id,
+                mode,
+                question[:120],
+            )
+            return "I could not retrieve an answer right now. Please try again."
+
         if isinstance(answer, str):
             return answer
 
-        chunks: list[str] = []
-        async for chunk in answer:
-            chunks.append(chunk)
-        return "".join(chunks)
+        # Streaming async response
+        if hasattr(answer, "__aiter__"):
+            chunks: list[str] = []
+            async for chunk in answer:
+                if chunk is not None:
+                    chunks.append(str(chunk))
+            merged = "".join(chunks).strip()
+            return merged or "I could not retrieve an answer right now. Please try again."
+
+        # Fallback for unexpected sync iterable responses
+        if hasattr(answer, "__iter__"):
+            try:
+                merged = "".join(str(chunk) for chunk in answer if chunk is not None).strip()
+                return merged or "I could not retrieve an answer right now. Please try again."
+            except Exception:
+                pass
+
+        # Final safe fallback for unknown response types
+        return str(answer).strip() or "I could not retrieve an answer right now. Please try again."
 
     def get_graph_data(self, user_id: UUID | str) -> dict:
         """
