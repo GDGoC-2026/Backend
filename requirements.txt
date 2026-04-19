@@ -109,6 +109,5 @@ websockets==16.0
 xxhash==3.6.0
 yarl==1.23.0
 lightrag-hku>=0.1.21
-google-generativeai>=0.8.3
 networkx>=3.0
 zstandard==0.25.0
