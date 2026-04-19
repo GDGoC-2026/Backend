@@ -121,7 +121,6 @@ class LightRAGService:
             period_seconds=60.0,
         )
         self._embedding_semaphore = asyncio.Semaphore(self._embedding_max_concurrency)
-        self._pipeline_initialized = False
 
         self._configure_model_endpoints()
         self._embedding_func = self._build_embedding_func()
@@ -501,13 +500,20 @@ class LightRAGService:
     async def _ensure_initialized(self, rag: LightRAG):
         if not getattr(rag, "_initialized", False):
             await rag.initialize_storages()
-
-            if not self._pipeline_initialized:
-                from lightrag.kg.shared_storage import initialize_pipeline_status
-                await initialize_pipeline_status()
-                self._pipeline_initialized = True
-
             rag._initialized = True # type: ignore
+
+        # Keep pipeline status namespace healthy for every request path.
+        # This is idempotent and prevents sporadic NoneType assignment errors
+        # in LightRAG shared storage when process state gets out of sync.
+        from lightrag.kg.shared_storage import initialize_pipeline_status
+
+        await initialize_pipeline_status()
+
+    def _reset_user_rag_instance(self, user_id: UUID | str) -> None:
+        """Drop cached LightRAG instance for a user so it can be rebuilt cleanly."""
+        user_id_str = str(user_id)
+        if user_id_str in self._rag_instances:
+            del self._rag_instances[user_id_str]
 
     def get_rag_instance(self, user_id: UUID | str) -> LightRAG:
         """
@@ -573,8 +579,25 @@ class LightRAGService:
             raise ValueError(f"Invalid query mode '{mode}'. Allowed modes: {sorted(valid_modes)}")
 
         query_param = QueryParam(mode=cast(SupportedQueryMode, mode))
-        
-        answer = await rag.aquery(question, param=query_param)
+
+        try:
+            answer = await rag.aquery(question, param=query_param)
+        except TypeError as exc:
+            error_text = str(exc).lower()
+            if "nonetype" not in error_text or "item assignment" not in error_text:
+                raise
+
+            logger.warning(
+                "LightRAG query hit shared-state corruption for user=%s. "
+                "Resetting instance and retrying once. Error: %s",
+                user_id,
+                str(exc),
+            )
+            self._reset_user_rag_instance(user_id)
+            rag = self.get_rag_instance(user_id)
+            await self._ensure_initialized(rag)
+            answer = await rag.aquery(question, param=query_param)
+
         if isinstance(answer, str):
             return answer
 
