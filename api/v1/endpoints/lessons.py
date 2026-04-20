@@ -36,7 +36,7 @@ from Backend.services.workflows.config import (
     StudentProfile,
 )
 from Backend.services.web_research_agent import get_web_research_agent
-from Backend.services.workflows.utils.grounding import build_source_context, chunk_source_material
+from Backend.services.workflows.utils.grounding import build_source_context, chunk_source_material, normalize_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -139,7 +139,392 @@ def _extract_agent_payload(workflow_log: list[dict[str, Any]], agent_name: str) 
     return None
 
 
+def _question_signature(text: str) -> str:
+    return re.sub(r"\s+", " ", normalize_text(text)).casefold()
+
+
+def _pick_progression_stage(index: int, total: int) -> str:
+    if total <= 1:
+        return "foundation"
+    if index == 0:
+        return "foundation"
+    if index >= total - 1:
+        return "integration"
+    if index == total - 2:
+        return "advanced"
+    return "core"
+
+
+def _first_sentence(value: str) -> str:
+    normalized = normalize_text(value)
+    if not normalized:
+        return ""
+
+    segments = re.split(r"(?<=[.!?])\s+", normalized)
+    return (segments[0] if segments else normalized).strip()
+
+
+def _extract_candidate_term(statement: str, fallback: str) -> str:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", statement or "")
+    for token in tokens:
+        lowered = token.casefold()
+        if lowered in {
+            "this",
+            "that",
+            "which",
+            "where",
+            "when",
+            "from",
+            "with",
+            "into",
+            "about",
+            "while",
+            "their",
+            "there",
+            "because",
+            "through",
+        }:
+            continue
+        if fallback and lowered in fallback.casefold():
+            continue
+        return token
+
+    fallback_parts = re.findall(r"[A-Za-z][A-Za-z0-9_-]+", fallback or "")
+    return fallback_parts[0] if fallback_parts else "the core concept"
+
+
+def _build_did_you_know_fact(section: dict[str, Any], topic: str) -> str:
+    source_support = section.get("source_support") or []
+    key_points = section.get("key_points") or []
+    section_title = normalize_text(str(section.get("title", "")))
+
+    candidate = ""
+    if source_support:
+        candidate = _first_sentence(str(source_support[0]))
+    elif key_points:
+        candidate = _first_sentence(str(key_points[0]))
+    elif section_title:
+        candidate = f"{section_title} is a key part of understanding {topic}."
+
+    if not candidate:
+        candidate = f"Understanding this section strengthens your grasp of {topic}."
+
+    if len(candidate) < 35:
+        candidate = f"{candidate} This is often overlooked but highly useful in practice."
+
+    return candidate
+
+
+def _build_quick_check(section: dict[str, Any], topic: str, order_index: int) -> dict[str, Any]:
+    section_title = normalize_text(str(section.get("title", ""))) or "this section"
+    source_support = section.get("source_support") or []
+    key_points = section.get("key_points") or []
+
+    evidence = ""
+    if source_support:
+        evidence = _first_sentence(str(source_support[0]))
+    elif key_points:
+        evidence = _first_sentence(str(key_points[0]))
+    if not evidence:
+        evidence = f"{section_title} explains a practical principle in {topic}."
+
+    if order_index % 2 == 0:
+        distractors = [
+            f"{section_title} is unrelated to {topic} and has no practical value.",
+            f"{section_title} should always be ignored when solving {topic} problems.",
+        ]
+        options = [evidence, *distractors]
+        return {
+            "type": "quick_check",
+            "purpose": "immediate_understanding",
+            "format": "multiple_choice",
+            "question": f"Quick check: Which statement best reflects {section_title}?",
+            "options": options,
+            "correct_answer_index": 0,
+            "explanation": "Choose the option that matches the lesson explanation in this section.",
+        }
+
+    answer_term = _extract_candidate_term(evidence, section_title)
+    blanked = re.sub(re.escape(answer_term), "_____", evidence, count=1, flags=re.IGNORECASE)
+    if blanked == evidence:
+        blanked = f"{section_title} helps explain _____ in {topic}."
+
+    return {
+        "type": "quick_check",
+        "purpose": "immediate_understanding",
+        "format": "fill_blank",
+        "question": f"Quick check: Fill in the blank. {blanked}",
+        "correct_answers": [answer_term],
+        "explanation": "Fill the blank with the core term emphasized in this section.",
+    }
+
+
+def _enrich_sections_with_in_lesson_interactions(
+    *,
+    topic: str,
+    sections: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    enriched_sections: list[dict[str, Any]] = []
+    in_lesson_elements: list[dict[str, Any]] = []
+    blocked_signatures: set[str] = set()
+
+    main_sections = [section for section in sections if str(section.get("type")) == "main_content"]
+    total_main_sections = max(1, len(main_sections))
+    main_index = 0
+
+    for section in sections:
+        section_copy = dict(section)
+
+        if str(section_copy.get("type")) != "main_content":
+            enriched_sections.append(section_copy)
+            continue
+
+        stage = _pick_progression_stage(main_index, total_main_sections)
+        did_you_know = {
+            "type": "did_you_know",
+            "purpose": "engagement",
+            "prompt": "Did you know?",
+            "fact": _build_did_you_know_fact(section_copy, topic),
+        }
+        quick_check = _build_quick_check(section_copy, topic, main_index)
+
+        section_copy["progression_stage"] = stage
+        section_copy["interactive_elements"] = [did_you_know, quick_check]
+
+        in_lesson_elements.append(
+            {
+                "section_id": section_copy.get("id"),
+                "section_title": section_copy.get("title"),
+                "progression_stage": stage,
+                "did_you_know": did_you_know,
+                "quick_check": quick_check,
+                "purpose": "in_lesson_engagement_and_comprehension",
+            }
+        )
+
+        blocked_signatures.add(_question_signature(str(quick_check.get("question", ""))))
+        main_index += 1
+        enriched_sections.append(section_copy)
+
+    return enriched_sections, in_lesson_elements, blocked_signatures
+
+
+def _to_mcq_from_true_false(question_item: dict[str, Any]) -> dict[str, Any]:
+    statement = normalize_text(str(question_item.get("question", "")))
+    correct_bool = bool(question_item.get("correct_answer", False))
+    correct_option = "True" if correct_bool else "False"
+    return {
+        "format": "multiple_choice",
+        "question": f"True or False: {statement}",
+        "options": [correct_option, "False" if correct_bool else "True"],
+        "correct_answer_index": 0,
+        "explanation": normalize_text(str(question_item.get("explanation", "")))
+        or "Evaluate whether the statement matches the lesson context.",
+    }
+
+
+def _build_application_exercise(
+    *,
+    topic: str,
+    section: dict[str, Any],
+    order_index: int,
+) -> dict[str, Any]:
+    title = normalize_text(str(section.get("title", ""))) or "the concept"
+    key_points = section.get("key_points") or []
+    anchor = _first_sentence(str(key_points[0])) if key_points else f"the core principle of {title}"
+
+    if order_index % 2 == 0:
+        options = [
+            f"Prioritize {anchor} while considering the context and constraints.",
+            f"Ignore {title} and focus only on memorizing definitions.",
+            f"Apply {title} the same way in every scenario without evaluation.",
+        ]
+        return {
+            "format": "multiple_choice",
+            "question": f"Application practice: In a real {topic} scenario, what is the best first move for {title}?",
+            "options": options,
+            "correct_answer_index": 0,
+            "explanation": "Application tasks reward context-aware decisions, not rote steps.",
+        }
+
+    answer_term = _extract_candidate_term(anchor, title)
+    question = f"Application practice: When using {title}, start by evaluating _____ before acting."
+    return {
+        "format": "fill_blank",
+        "question": question,
+        "correct_answers": [answer_term],
+        "explanation": "Applying the concept begins with selecting the right contextual signal.",
+    }
+
+
+def _build_end_of_lesson_exercises(
+    *,
+    topic: str,
+    sections: list[dict[str, Any]],
+    flashcard_payload: dict[str, Any] | None,
+    quiz_payload: dict[str, Any] | None,
+    blocked_signatures: set[str],
+) -> dict[str, Any]:
+    flashcards = list((flashcard_payload or {}).get("flashcards", []) or [])
+    quiz_questions = list((quiz_payload or {}).get("questions", []) or [])
+
+    used_signatures = set(blocked_signatures)
+
+    def is_available(question_text: str) -> bool:
+        signature = _question_signature(question_text)
+        if not signature or signature in used_signatures:
+            return False
+        used_signatures.add(signature)
+        return True
+
+    memorization: list[dict[str, Any]] = []
+    consolidation: list[dict[str, Any]] = []
+    application: list[dict[str, Any]] = []
+
+    for card in flashcards:
+        card_question = normalize_text(str(card.get("question", "")))
+        card_answer = normalize_text(str(card.get("answer", "")))
+        if not card_question or not card_answer:
+            continue
+        if not is_available(card_question):
+            continue
+
+        options = [
+            card_answer,
+            f"A loosely related detail about {topic}.",
+            f"A statement that contradicts the main lesson idea.",
+        ]
+        memorization.append(
+            {
+                "exercise_id": f"mem-{len(memorization) + 1}",
+                "goal": "memorization",
+                "purpose": "retention",
+                "difficulty": "easy",
+                "format": "multiple_choice",
+                "question": card_question,
+                "options": options,
+                "correct_answer_index": 0,
+                "explanation": "Memorization exercises reinforce core facts and definitions.",
+            }
+        )
+
+        if len(memorization) >= 6:
+            break
+
+    for question_item in quiz_questions:
+        qtype = str(question_item.get("type", "")).casefold()
+        question_text = normalize_text(str(question_item.get("question", "")))
+        if not question_text:
+            continue
+        if not is_available(question_text):
+            continue
+
+        if qtype == "multiple_choice":
+            consolidation.append(
+                {
+                    "exercise_id": f"con-{len(consolidation) + 1}",
+                    "goal": "consolidation",
+                    "purpose": "understanding",
+                    "difficulty": "intermediate",
+                    "format": "multiple_choice",
+                    "question": question_text,
+                    "options": list(question_item.get("options", []) or []),
+                    "correct_answer_index": int(question_item.get("correct_answer", 0)),
+                    "explanation": normalize_text(str(question_item.get("explanation", ""))),
+                }
+            )
+        elif qtype == "fill_blank":
+            consolidation.append(
+                {
+                    "exercise_id": f"con-{len(consolidation) + 1}",
+                    "goal": "consolidation",
+                    "purpose": "understanding",
+                    "difficulty": "intermediate",
+                    "format": "fill_blank",
+                    "question": question_text,
+                    "correct_answers": list(question_item.get("correct_answers", []) or []),
+                    "explanation": normalize_text(str(question_item.get("explanation", ""))),
+                }
+            )
+        elif qtype == "true_false":
+            converted = _to_mcq_from_true_false(question_item)
+            consolidation.append(
+                {
+                    "exercise_id": f"con-{len(consolidation) + 1}",
+                    "goal": "consolidation",
+                    "purpose": "understanding",
+                    "difficulty": "intermediate",
+                    **converted,
+                }
+            )
+
+        if len(consolidation) >= 8:
+            break
+
+    main_sections = [section for section in sections if str(section.get("type")) == "main_content"]
+    for index, section in enumerate(main_sections[:6]):
+        synthesized = _build_application_exercise(topic=topic, section=section, order_index=index)
+        if not is_available(str(synthesized.get("question", ""))):
+            continue
+
+        application.append(
+            {
+                "exercise_id": f"app-{len(application) + 1}",
+                "goal": "application",
+                "purpose": "practice",
+                "difficulty": "advanced" if index >= 2 else "intermediate",
+                **synthesized,
+            }
+        )
+
+        if len(application) >= 6:
+            break
+
+    exercise_sets = [
+        {
+            "set_id": "memorization",
+            "title": "Memorization",
+            "purpose": "retention",
+            "recommended_difficulty": "easy",
+            "exercises": memorization,
+        },
+        {
+            "set_id": "consolidation",
+            "title": "Consolidation",
+            "purpose": "deeper understanding",
+            "recommended_difficulty": "intermediate",
+            "exercises": consolidation,
+        },
+        {
+            "set_id": "application",
+            "title": "Application and Practice",
+            "purpose": "skill transfer and problem solving",
+            "recommended_difficulty": "intermediate_to_advanced",
+            "exercises": application,
+        },
+    ]
+
+    flattened = [
+        exercise
+        for exercise_set in exercise_sets
+        for exercise in exercise_set["exercises"]
+    ]
+
+    return {
+        "exercise_sets": exercise_sets,
+        "all_exercises": flattened,
+        "total_exercises": len(flattened),
+        "progression": ["easy", "intermediate", "advanced"],
+        "design_rules": {
+            "in_lesson_prompts": "immediate understanding and engagement",
+            "end_of_lesson_exercises": "retention, consolidation, and application",
+            "overlap_avoidance": "Question signatures are deduplicated between stages",
+        },
+    }
+
+
 def _build_lesson_pages(
+    topic: str,
     prompt: str,
     source_documents: list[LessonSourceDocument],
     lesson_payload: dict[str, Any] | None,
@@ -171,9 +556,21 @@ def _build_lesson_pages(
     )
     order += 1
 
+    enriched_sections: list[dict[str, Any]] = []
+    in_lesson_elements: list[dict[str, Any]] = []
+    in_lesson_blocked_signatures: set[str] = set()
+
     if lesson_payload:
         lesson_data = lesson_payload.get("lesson", {})
-        sections = lesson_payload.get("sections", [])
+        sections = list(lesson_payload.get("sections", []) or [])
+        (
+            enriched_sections,
+            in_lesson_elements,
+            in_lesson_blocked_signatures,
+        ) = _enrich_sections_with_in_lesson_interactions(
+            topic=topic,
+            sections=sections,
+        )
         resources = lesson_payload.get("learning_resources", [])
         pages.append(
             LessonPage(
@@ -181,12 +578,22 @@ def _build_lesson_pages(
                 order=order,
                 page_type="theory",
                 title="Theory and Knowledge",
-                description="Structured conceptual lesson content.",
+                description="Progressive textbook-style explanations with in-lesson interaction prompts.",
                 estimated_time_minutes=int(lesson_payload.get("estimated_duration_minutes", 0)),
                 data={
                     "lesson": _to_json_safe(lesson_data),
-                    "sections": _to_json_safe(sections),
-                    "total_sections": int(lesson_payload.get("total_sections", len(sections))),
+                    "sections": _to_json_safe(enriched_sections),
+                    "total_sections": int(lesson_payload.get("total_sections", len(enriched_sections))),
+                    "in_lesson_interactions": _to_json_safe(in_lesson_elements),
+                    "module_design": {
+                        "style": "textbook_progressive",
+                        "theory_progression": [
+                            section.get("progression_stage")
+                            for section in enriched_sections
+                            if isinstance(section, dict) and section.get("progression_stage")
+                        ],
+                        "interaction_policy": "did_you_know_and_quick_checks_interleaved",
+                    },
                 },
             )
         )
@@ -226,40 +633,60 @@ def _build_lesson_pages(
         )
         order += 1
 
+    exercise_plan = _build_end_of_lesson_exercises(
+        topic=topic,
+        sections=enriched_sections,
+        flashcard_payload=flashcard_payload,
+        quiz_payload=quiz_payload,
+        blocked_signatures=in_lesson_blocked_signatures,
+    )
+
     if flashcard_payload:
-        flashcards = flashcard_payload.get("flashcards", [])
+        flashcards = [
+            card
+            for card in (flashcard_payload.get("flashcards", []) or [])
+            if _question_signature(str(card.get("question", ""))) not in in_lesson_blocked_signatures
+        ]
         pages.append(
             LessonPage(
                 page_id="flashcards",
                 order=order,
                 page_type="flashcards",
-                title="Flashcards",
-                description="Practice key concepts with spaced-repetition cards.",
+                title="End-of-Lesson Memorization Deck",
+                description="Post-lesson memorization cards for retention practice.",
                 estimated_time_minutes=10,
                 data={
                     "cards": _to_json_safe(flashcards),
                     "total_cards": int(flashcard_payload.get("total_cards", len(flashcards))),
+                    "purpose": "post_lesson_memorization",
                 },
             )
         )
         order += 1
 
-    if quiz_payload:
-        questions = [_to_json_safe(question) for question in quiz_payload.get("questions", [])]
+    if quiz_payload or exercise_plan.get("total_exercises", 0) > 0:
+        questions = [_to_json_safe(question) for question in exercise_plan.get("all_exercises", [])]
 
         pages.append(
             LessonPage(
                 page_id="quiz",
                 order=order,
                 page_type="quiz",
-                title="Quiz",
-                description="Check understanding with adaptive quiz questions.",
-                estimated_time_minutes=int(quiz_payload.get("estimated_duration_minutes", 0)),
+                title="End-of-Lesson Exercises",
+                description="Structured practice for memorization, consolidation, and application.",
+                estimated_time_minutes=max(
+                    int((quiz_payload or {}).get("estimated_duration_minutes", 0)),
+                    max(10, len(questions) * 2),
+                ),
                 data={
-                    "quiz": _to_json_safe(quiz_payload.get("quiz", {})),
+                    "quiz": _to_json_safe((quiz_payload or {}).get("quiz", {})),
                     "questions": questions,
-                    "total_questions": int(quiz_payload.get("total_questions", len(questions))),
-                    "question_types": _to_json_safe(quiz_payload.get("question_types", [])),
+                    "total_questions": len(questions),
+                    "question_types": _to_json_safe((quiz_payload or {}).get("question_types", [])),
+                    "exercise_sets": _to_json_safe(exercise_plan.get("exercise_sets", [])),
+                    "exercise_progression": _to_json_safe(exercise_plan.get("progression", [])),
+                    "design_rules": _to_json_safe(exercise_plan.get("design_rules", {})),
+                    "answer_key_included": include_answer_key,
                 },
             )
         )
@@ -687,6 +1114,7 @@ async def generate_lesson(
     mindmap_payload = _extract_agent_payload(workflow_log, "MindmapCreatorAgent")
 
     pages = _build_lesson_pages(
+        topic=resolved_topic,
         prompt=prompt,
         source_documents=source_documents,
         lesson_payload=lesson_payload,

@@ -270,6 +270,10 @@ Important implementation details for `POST /lessons/generate`:
 - Required field: `prompt` (minimum 10 chars).
 - Optional fields include: `topic`, `subject`, `subtopics`, `learning_objectives`, `current_level`, `learning_style`, `learning_pace`, `daily_study_time_minutes`, `max_quiz_questions`, `quiz_question_types`, `include_mindmap`, `include_coding_exercises`, `include_answer_key`, `include_external_sources`, `external_search_query`, `max_external_sources`, and uploaded `files`.
 - When `include_external_sources=true`, the backend performs web research and includes matched references under `overview.data.external_sources` and `resources.data.external_sources`.
+- Textbook-style structure is enforced in output:
+  - `theory.data.sections[*].interactive_elements` includes in-lesson prompts (`did_you_know` + `quick_check`) for immediate engagement and comprehension.
+  - `quiz.data.exercise_sets` contains post-lesson exercises grouped by purpose: `memorization`, `consolidation`, and `application`.
+  - `quiz.data.design_rules` explicitly separates in-lesson checks from end-of-lesson practice and applies overlap-avoidance.
 
 `FormData` example:
 

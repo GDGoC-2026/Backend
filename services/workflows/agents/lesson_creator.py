@@ -165,6 +165,7 @@ class LessonCreatorAgent(BaseAgent):
                                      source_context: str) -> List[Dict[str, Any]]:
         """Create lesson sections"""
         sections = []
+        total_subtopics = max(1, len(subtopics))
         overview_sentences = select_relevant_sentences(
             source_context,
             extract_keywords(topic, *subtopics, *learning_objectives, prompt),
@@ -184,6 +185,7 @@ class LessonCreatorAgent(BaseAgent):
         
         # Main content sections from subtopics
         for i, subtopic in enumerate(subtopics, 1):
+            progression_stage = self._resolve_progression_stage(i - 1, total_subtopics)
             source_support = prioritize_phrase_matches(
                 select_relevant_sentences(
                     source_context,
@@ -204,6 +206,7 @@ class LessonCreatorAgent(BaseAgent):
                     lesson_style=lesson_style,
                     learning_objectives=learning_objectives,
                     source_support=source_support,
+                    progression_stage=progression_stage,
                 ),
                 "learning_outcomes": [
                     f"Understand key aspects of {subtopic}",
@@ -212,6 +215,14 @@ class LessonCreatorAgent(BaseAgent):
                 ],
                 "key_points": await self._extract_key_points(subtopic, source_support, learning_objectives),
                 "source_support": source_support,
+                "progression_stage": progression_stage,
+                "instructional_intent": (
+                    "build_foundation"
+                    if progression_stage == "foundation"
+                    else "connect_and_apply"
+                    if progression_stage in {"core", "advanced"}
+                    else "synthesize_and_transfer"
+                ),
             }
             sections.append(section)
         
@@ -270,7 +281,8 @@ class LessonCreatorAgent(BaseAgent):
                                        difficulty: ContentLevel,
                                        lesson_style: str,
                                        learning_objectives: List[str],
-                                       source_support: List[str]) -> str:
+                                       source_support: List[str],
+                                       progression_stage: str) -> str:
         """
         Generate content for a section based on difficulty and style
         """
@@ -280,7 +292,14 @@ class LessonCreatorAgent(BaseAgent):
             ContentLevel.ADVANCED: "Focus on nuanced behavior, trade-offs, and edge cases.",
         }[difficulty]
 
-        lines = [f"**{subtopic}** in {topic}", descriptor]
+        stage_hint = {
+            "foundation": "Progression: Foundation building.",
+            "core": "Progression: Core understanding.",
+            "advanced": "Progression: Advanced connection.",
+            "integration": "Progression: Integration and synthesis.",
+        }.get(progression_stage, "Progression: Core understanding.")
+
+        lines = [f"**{subtopic}** in {topic}", descriptor, stage_hint]
 
         if source_support:
             lines.append("Grounded explanations:")
@@ -309,6 +328,17 @@ class LessonCreatorAgent(BaseAgent):
             )
 
         return "\n\n".join([lines[0], "\n".join(lines[1:])])
+
+    def _resolve_progression_stage(self, index: int, total: int) -> str:
+        if total <= 1:
+            return "foundation"
+        if index <= 0:
+            return "foundation"
+        if index >= total - 1:
+            return "integration"
+        if index == total - 2:
+            return "advanced"
+        return "core"
     
     async def _extract_key_points(
         self,
