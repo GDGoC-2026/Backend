@@ -39,7 +39,7 @@ At runtime, the API coordinates multiple services:
 Run all commands from the repository root.
 
 1.  **Environment Setup:**
-    ```powershell
+    ```bash
     python -m venv .venv
     .\.venv\Scripts\Activate.ps1
     pip install -r Backend/requirements.txt
@@ -47,7 +47,7 @@ Run all commands from the repository root.
     ```
 
 2.  **Database Migrations:**
-    ```powershell
+    ```bash
     alembic -c Backend/alembic.ini upgrade head
     ```
 
@@ -59,7 +59,7 @@ Run all commands from the repository root.
 ## 🐳 Docker
 
 To spin up the backend container:
-```powershell
+```bash
 docker compose -f Backend/docker-compose.yml up --build
 ```
 *Note: Ensure external services (PostgreSQL, Redis, etc.) are accessible via your `.env` configuration.*
